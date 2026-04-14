@@ -15,6 +15,10 @@ import sys
 from datetime import date
 from pathlib import Path
 
+# Suppress "Event loop is closed" noise from httpx cleanup on Windows Python 3.9
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from config import (
     NEWS_API_KEY,
     OPENAI_API_KEY,
@@ -268,14 +272,18 @@ async def run_all_flagged_music(provider: str = "ollama") -> None:
         run_dir = _find_run_dir_for(headline, day_dir)
         if run_dir is None:
             log.info(f"[pipeline] Generating lyrics for: {headline[:70]}")
-            _, run_dir = await _generate_and_save_lyrics(
-                headline=headline,
-                summary=e.get("summary", ""),
-                angle=e.get("angle", ""),
-                url=e.get("url", ""),
-                day_dir=day_dir,
-                provider=provider,
-            )
+            try:
+                _, run_dir = await _generate_and_save_lyrics(
+                    headline=headline,
+                    summary=e.get("summary", ""),
+                    angle=e.get("angle", ""),
+                    url=e.get("url", ""),
+                    day_dir=day_dir,
+                    provider=provider,
+                )
+            except Exception as exc:
+                log.error(f"[pipeline] Lyrics generation failed for '{headline[:60]}': {exc}")
+                continue
         else:
             log.info(f"[pipeline] Lyrics already exist, generating music for: {headline[:70]}")
 

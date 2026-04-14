@@ -179,7 +179,15 @@ async def generate_lyrics(
             last_error = e
             log.warning(f"[lyrics] JSON parse failed (attempt {attempt}/{max_retries}): {e}")
             if attempt == max_retries:
-                raise ValueError(f"LLM returned invalid JSON after {max_retries} attempts: {e}") from e
+                # Last resort: try json_repair before giving up
+                try:
+                    from json_repair import repair_json
+                    repaired = repair_json(raw)
+                    data = json.loads(repaired)
+                    log.warning("[lyrics] JSON recovered via json_repair")
+                    break
+                except Exception:
+                    raise ValueError(f"LLM returned invalid JSON after {max_retries} attempts: {e}") from e
             continue
 
     sections = [

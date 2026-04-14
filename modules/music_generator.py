@@ -88,7 +88,8 @@ async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) 
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 200:
-            raise RuntimeError(f"sunoapi.org error: {data}")
+            log.error(f"[music] sunoapi.org rejected request — code={data.get('code')} msg={data.get('msg')} data={data}")
+            raise RuntimeError(f"sunoapi.org error {data.get('code')}: {data.get('msg')}")
         return data["data"]["taskId"]
 
 

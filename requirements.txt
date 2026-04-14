@@ -28,6 +28,7 @@ openai-whisper>=20240930
 # Utilities
 aiofiles>=24.1.0
 tenacity>=9.0.0
+json-repair>=0.30.0
 
 # Social scoring
 pytrends>=4.9.2
