@@ -54,8 +54,9 @@ def _load_jsonl(path: Path) -> list[dict]:
 @st.cache_resource
 def _get_supabase():
     """Return a Supabase client, or None if not configured."""
-    url = os.getenv("SUPABASE_URL", "")
-    key = os.getenv("SUPABASE_KEY", "")
+    # st.secrets takes precedence (Streamlit Cloud); fall back to env vars (local)
+    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+    key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
     if not url or not key:
         return None
     try:
@@ -338,10 +339,12 @@ if page == "Credits":
     st.caption("Click 'Check credits' to fetch current status for all APIs.")
 
     if st.button("Check credits", type="primary"):
-        runway_key = os.getenv("RUNWAYML_API_SECRET", "")
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        news_key = os.getenv("NEWS_API_KEY", "")
-        grok_key = os.getenv("XAI_API_KEY", "")
+        def _secret(key: str) -> str:
+            return st.secrets.get(key, os.getenv(key, ""))
+        runway_key = _secret("RUNWAYML_API_SECRET")
+        openai_key = _secret("OPENAI_API_KEY")
+        news_key = _secret("NEWS_API_KEY")
+        grok_key = _secret("XAI_API_KEY")
 
         col1, col2, col3, col4 = st.columns(4)
 
