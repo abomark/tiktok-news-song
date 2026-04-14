@@ -80,7 +80,6 @@ async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) 
         "prompt": lyrics,
         "style": style,
         "title": title,
-        "callBackUrl": "",
     }
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=60) as client:
