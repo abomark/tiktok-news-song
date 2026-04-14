@@ -1,0 +1,34 @@
+Write a short TikTok song about this news story:
+
+HEADLINE: {headline}
+SUMMARY: {summary}
+SATIRICAL ANGLE: {angle}
+
+Requirements:
+- Total song length: 30-45 seconds when sung at a moderate pop tempo (~100 BPM)
+- Structure: 1 hook (opening 3 seconds, one punchy and controversial line) + 1 verse (4-6 lines) + 1 chorus (4 lines, repeated feel)
+- Each line: 6-12 syllables with natural rhythmic flow
+- Tone: satirical, fun, slightly sarcastic — like a meme in song form
+- Style: upbeat pop or hip-hop, modern, radio-friendly
+- Vocal vibe: match the story — deadpan for absurd news, hyped for drama, sarcastic for political stories
+
+Also generate:
+- A Suno style prompt (music genre tags + mood, e.g. "upbeat pop, punchy drums, catchy hook, modern production")
+- 1-2 specific topic hashtags based on the actual news subject (e.g. #trump, #gaza, #royalfamily — NOT generic like #news or #trending)
+- 2 fixed hash-tags (#fyp, #newsatire)
+- A short TikTok caption (max 100 chars) — should provoke curiosity or take a hot-take stance
+- Ready-to-paste Suno lyrics with metatags ([Hook], [Verse], [Chorus])
+
+Respond with this exact JSON structure:
+{{
+  "title": "Song title here",
+  "hook": ["One punchy opening line"],
+  "verse": ["line 1", "line 2", "line 3", "line 4"],
+  "chorus": ["line 1", "line 2", "line 3", "line 4"],
+  "suno_lyrics": "[Hook]\nLine 1\nLine 2\n\n[Verse]\n...\n\n[Chorus]\n...",
+  "style_prompt": "upbeat pop, ...",
+  "vocal_vibe": "deadpan / hyped / sarcastic",
+  "caption": "Short hook caption here",
+  "topic_tags": ["#specifictag1", "#specifictag2"],
+  "keywords": ["[Keyword1]", "[Keyword2]"]
+}}

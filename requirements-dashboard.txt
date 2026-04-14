@@ -1,0 +1,7 @@
+streamlit
+supabase
+httpx
+python-dotenv
+pandas
+openai
+anthropic
