@@ -44,8 +44,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(OUTPUT_DIR / "pipeline.log"),
+        logging.FileHandler(OUTPUT_DIR / "pipeline.log", encoding="utf-8"),
     ],
+)
+# Ensure stdout handler doesn't crash on emoji/unicode on Windows
+logging.getLogger().handlers[0].stream = open(
+    sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1, closefd=False
 )
 log = logging.getLogger(__name__)
 

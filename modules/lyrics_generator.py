@@ -100,6 +100,17 @@ def load_user_prompt_template() -> str:
     return _load_prompt("lyrics_user_prompt.txt", _DEFAULT_USER_PROMPT_TEMPLATE)
 
 
+def _flatten_string_list(val: list) -> list[str]:
+    """Flatten any accidentally nested lists the LLM returns, keeping only strings."""
+    out = []
+    for item in val:
+        if isinstance(item, list):
+            out.extend(str(s) for s in item)
+        else:
+            out.append(str(item))
+    return out
+
+
 async def generate_lyrics(
     headline: str,
     summary: str,
@@ -111,10 +122,12 @@ async def generate_lyrics(
     ollama_base_url: str = "http://localhost:11434/v1",
     base_url: str | None = None,
     output_dir: Path | None = None,
+    max_retries: int = 3,
 ) -> Lyrics:
     """Call an OpenAI-compatible LLM and parse the lyrics response.
 
     If base_url is provided, uses that (e.g. xAI/Grok). Otherwise falls back to ollama_base_url.
+    Retries up to max_retries times if the model returns malformed JSON.
     """
     effective_base = base_url or ollama_base_url
     effective_key = api_key if api_key != "ollama" else "ollama"
@@ -136,35 +149,43 @@ async def generate_lyrics(
         "user_prompt": prompt,
     }, run_dir=output_dir)
 
-    log.info(f"[lyrics] Calling {effective_base} ({model}) to generate lyrics...")
-    message = await client.chat.completions.create(
-        model=model,
-        max_tokens=1024,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": prompt},
-        ],
-    )
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        log.info(f"[lyrics] Calling {effective_base} ({model}) — attempt {attempt}/{max_retries}...")
+        message = await client.chat.completions.create(
+            model=model,
+            max_tokens=1024,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": prompt},
+            ],
+        )
 
-    raw = message.choices[0].message.content.strip()
+        raw = message.choices[0].message.content.strip()
 
-    # Log the API response
-    log_api_call("lyrics-llm-response", {
-        "raw_response": raw,
-    }, run_dir=output_dir)
-    # Strip any accidental markdown fences
-    raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+        # Log the API response
+        log_api_call("lyrics-llm-response", {
+            "raw_response": raw,
+            "attempt": attempt,
+        }, run_dir=output_dir)
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        log.error(f"[lyrics] JSON parse failed. Raw response:\n{raw}")
-        raise ValueError(f"Claude returned invalid JSON: {e}") from e
+        # Strip any accidental markdown fences
+        raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+
+        try:
+            data = json.loads(raw)
+            break  # success
+        except json.JSONDecodeError as e:
+            last_error = e
+            log.warning(f"[lyrics] JSON parse failed (attempt {attempt}/{max_retries}): {e}")
+            if attempt == max_retries:
+                raise ValueError(f"LLM returned invalid JSON after {max_retries} attempts: {e}") from e
+            continue
 
     sections = [
-        LyricSection(label="hook", lines=data["hook"]),
-        LyricSection(label="verse", lines=data["verse"]),
-        LyricSection(label="chorus", lines=data["chorus"]),
+        LyricSection(label="hook",   lines=_flatten_string_list(data["hook"])),
+        LyricSection(label="verse",  lines=_flatten_string_list(data["verse"])),
+        LyricSection(label="chorus", lines=_flatten_string_list(data["chorus"])),
     ]
 
     # Build hashtag string
