@@ -20,7 +20,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 10   # seconds between status checks
-MAX_WAIT = 600       # seconds before giving up (generations take 2-3 min)
+MAX_WAIT = 600       # seconds before giving up (generations take 2-5 min)
 DEFAULT_BASE = "https://api.sunoapi.org"
 
 
@@ -42,8 +42,12 @@ async def generate_music(
     """Submit lyrics to sunoapi.org, poll until done, download .mp3."""
     log.info("[music] Submitting to sunoapi.org...")
 
+    # Append [END] so Suno stops at the end of the written lyrics (~30-40s)
+    # without it Suno often extends the song to 2+ minutes
+    lyrics_with_end = lyrics_text.rstrip() + "\n\n[END]"
+
     task_id = await _submit(
-        lyrics=lyrics_text,
+        lyrics=lyrics_with_end,
         style=style_prompt,
         title=title,
         api_key=sunoapi_key,
@@ -113,6 +117,8 @@ async def _poll_until_ready(task_id: str, api_key: str, base: str) -> tuple[str,
                 )
                 resp.raise_for_status()
                 body = resp.json()
+                if elapsed <= POLL_INTERVAL:
+                    log.info(f"[music] First poll response: {body}")
                 item = body.get("data", {})
                 status = item.get("status", "")
 
@@ -128,7 +134,7 @@ async def _poll_until_ready(task_id: str, api_key: str, base: str) -> tuple[str,
                 elif status in FAILED:
                     raise RuntimeError(f"sunoapi.org generation failed with status: {status}")
 
-                log.debug(f"[music] Status: {status} ({elapsed}s elapsed)")
+                log.info(f"[music] Status: {status} ({elapsed}s elapsed)")
 
             except httpx.HTTPError as e:
                 log.warning(f"[music] Poll error (retrying): {e}")
