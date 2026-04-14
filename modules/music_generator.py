@@ -1,12 +1,11 @@
 """
-Generates a song MP3 via the suno-api Docker wrapper.
+Generates a song MP3 via sunoapi.org (hosted Suno API).
 
 Setup:
-  git clone https://github.com/gcui-art/suno-api.git && cd suno-api
-  docker compose up -d   (set SUNO_COOKIE in suno-api/.env first)
-  Then set SUNO_API_BASE=http://localhost:3000 in your project .env
+  1. Sign up at https://sunoapi.org and get an API key.
+  2. Set SUNOAPI_KEY=your_key_here in your .env
 
-The suno-api project: https://github.com/gcui-art/suno-api
+API docs: https://docs.sunoapi.org
 """
 
 from __future__ import annotations
@@ -20,8 +19,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL = 5   # seconds between status checks
-MAX_WAIT = 300       # seconds before giving up
+POLL_INTERVAL = 10   # seconds between status checks
+MAX_WAIT = 600       # seconds before giving up (generations take 2-3 min)
+DEFAULT_BASE = "https://api.sunoapi.org"
 
 
 @dataclass
@@ -36,80 +36,101 @@ async def generate_music(
     style_prompt: str,
     title: str,
     output_dir: Path,
-    suno_cookie: str,
-    suno_api_base: str,
+    sunoapi_key: str,
+    sunoapi_base: str = DEFAULT_BASE,
 ) -> AudioResult:
-    """Submit lyrics to Suno, poll until done, download .mp3."""
-    log.info("[music] Submitting to Suno...")
+    """Submit lyrics to sunoapi.org, poll until done, download .mp3."""
+    log.info("[music] Submitting to sunoapi.org...")
 
-    song_id = await _submit_to_suno(
+    task_id = await _submit(
         lyrics=lyrics_text,
         style=style_prompt,
         title=title,
-        cookie=suno_cookie,
-        base=suno_api_base,
+        api_key=sunoapi_key,
+        base=sunoapi_base,
     )
-    log.info(f"[music] Suno job ID: {song_id}")
+    log.info(f"[music] Task ID: {task_id}")
 
-    audio_url = await _poll_until_ready(song_id=song_id, base=suno_api_base)
+    audio_url, duration = await _poll_until_ready(
+        task_id=task_id,
+        api_key=sunoapi_key,
+        base=sunoapi_base,
+    )
     log.info(f"[music] Audio ready: {audio_url}")
 
     mp3_path = output_dir / "song.mp3"
     await _download_file(audio_url, mp3_path)
     log.info(f"[music] Saved to {mp3_path}")
 
-    duration = await _get_duration(mp3_path)
+    # Use API-reported duration if available; fall back to ffprobe
+    if not duration:
+        duration = await _get_duration(mp3_path)
     log.info(f"[music] Duration: {duration:.1f}s")
 
     return AudioResult(path=mp3_path, duration_seconds=duration, title=title)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-async def _submit_to_suno(lyrics: str, style: str, title: str, cookie: str, base: str) -> str:
-    """POST to suno-api and return the song clip ID."""
+async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) -> str:
+    """POST to sunoapi.org and return the task ID."""
     payload = {
+        "customMode": True,
+        "instrumental": False,
+        "model": "V4",
         "prompt": lyrics,
-        "tags": style,
+        "style": style,
         "title": title,
-        "make_instrumental": False,
-        "wait_audio": False,
+        "callBackUrl": "",
     }
-    headers = {"Cookie": cookie}
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(f"{base}/api/custom_generate", json=payload, headers=headers)
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(f"{base}/api/v1/generate", json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
-        # suno-api returns a list; take first clip
-        if isinstance(data, list):
-            return data[0]["id"]
-        return data["id"]
+        if data.get("code") != 200:
+            raise RuntimeError(f"sunoapi.org error: {data}")
+        return data["data"]["taskId"]
 
 
-async def _poll_until_ready(song_id: str, base: str) -> str:
-    """Poll the suno-api feed endpoint until the clip is complete."""
+async def _poll_until_ready(task_id: str, api_key: str, base: str) -> tuple[str, float]:
+    """Poll record-info until SUCCESS; return (audio_url, duration_seconds)."""
+    headers = {"Authorization": f"Bearer {api_key}"}
     elapsed = 0
+    FAILED = {"CREATE_TASK_FAILED", "GENERATE_AUDIO_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"}
+
     async with httpx.AsyncClient(timeout=30) as client:
         while elapsed < MAX_WAIT:
             await asyncio.sleep(POLL_INTERVAL)
             elapsed += POLL_INTERVAL
             try:
-                resp = await client.get(f"{base}/api/feed", params={"ids": song_id})
+                resp = await client.get(
+                    f"{base}/api/v1/generate/record-info",
+                    params={"taskId": task_id},
+                    headers=headers,
+                )
                 resp.raise_for_status()
-                items = resp.json()
-                if isinstance(items, list) and items:
-                    item = items[0]
-                    status = item.get("status", "")
-                    if status == "complete":
-                        audio_url = item.get("audio_url") or item.get("stream_audio_url")
+                body = resp.json()
+                item = body.get("data", {})
+                status = item.get("status", "")
+
+                if status == "SUCCESS":
+                    clips = item.get("sunoData", [])
+                    if clips:
+                        clip = clips[0]
+                        audio_url = clip.get("audioUrl") or clip.get("streamAudioUrl")
+                        duration = float(clip.get("duration") or 0)
                         if audio_url:
-                            return audio_url
-                    elif status in ("error", "failed"):
-                        raise RuntimeError(f"Suno generation failed: {item}")
-                    log.debug(f"[music] Suno status: {status} ({elapsed}s elapsed)")
+                            return audio_url, duration
+
+                elif status in FAILED:
+                    raise RuntimeError(f"sunoapi.org generation failed with status: {status}")
+
+                log.debug(f"[music] Status: {status} ({elapsed}s elapsed)")
+
             except httpx.HTTPError as e:
                 log.warning(f"[music] Poll error (retrying): {e}")
 
-    raise TimeoutError(f"Suno did not complete within {MAX_WAIT}s")
+    raise TimeoutError(f"sunoapi.org did not complete within {MAX_WAIT}s")
 
 
 async def _download_file(url: str, dest: Path) -> None:
@@ -155,8 +176,7 @@ if __name__ == "__main__":
             style_prompt="upbeat pop, punchy drums, catchy hook, satirical, modern production",
             title="Tariff Time",
             output_dir=out,
-            suno_cookie=os.environ["SUNO_COOKIE"],
-            suno_api_base=os.getenv("SUNO_API_BASE", "http://localhost:3000"),
+            sunoapi_key=os.environ["SUNOAPI_KEY"],
         )
         print(f"\nMP3: {result.path}")
         print(f"Duration: {result.duration_seconds:.1f}s")

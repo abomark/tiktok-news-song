@@ -13,10 +13,10 @@ FONTS_DIR = ASSETS_DIR / "fonts"
 # API keys
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-SUNO_COOKIE = os.environ["SUNO_COOKIE"]
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+SUNOAPI_KEY  = os.getenv("SUNOAPI_KEY", "")
+SUNOAPI_BASE = os.getenv("SUNOAPI_BASE", "https://api.sunoapi.org")
 RUNWAY_API_KEY = os.getenv("RUNWAYML_API_SECRET", "")
-SUNO_API_BASE = os.getenv("SUNO_API_BASE", "http://localhost:3000")
 TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "")
 TIKTOK_CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET", "")
 TIKTOK_REFRESH_TOKEN = os.getenv("TIKTOK_REFRESH_TOKEN", "")

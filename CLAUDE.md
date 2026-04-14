@@ -65,7 +65,7 @@ streamlit run app.py
 
 ## Known bugs to fix before production
 
-1. **`config.py:16–17`** — `os.environ["OPENAI_API_KEY"]` and `os.environ["SUNO_COOKIE"]` use hard-crash `environ[]` instead of `.getenv()`. This breaks `--lyrics-only` on a clean env. Fix: change both to `os.getenv(...)`.
+1. ~~**`config.py:16–17`**~~ — Fixed. `OPENAI_API_KEY` and `SUNO_COOKIE` hard-crash replaced with `os.getenv()`. `SUNO_COOKIE` removed entirely (replaced by `SUNOAPI_KEY`).
 
 2. **`pipeline.py:179–190`** — `audio` and `video` are undefined when `--dry-run-full` skips generation but code after the if-block references them. Fix: add early return after the dry-run-full music/video skip, or initialise to `None` and guard.
 

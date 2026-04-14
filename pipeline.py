@@ -16,11 +16,10 @@ from datetime import date
 from pathlib import Path
 
 from config import (
-    ANTHROPIC_API_KEY,
     NEWS_API_KEY,
     OPENAI_API_KEY,
-    SUNO_COOKIE,
-    SUNO_API_BASE,
+    SUNOAPI_KEY,
+    SUNOAPI_BASE,
     TIKTOK_CLIENT_KEY,
     TIKTOK_CLIENT_SECRET,
     TIKTOK_REFRESH_TOKEN,
@@ -278,8 +277,8 @@ async def run(dry_run: bool = False, dry_run_full: bool = False, lyrics_only: bo
             style_prompt=lyrics.style_prompt,
             title=lyrics.title,
             output_dir=output_dir,
-            suno_cookie=SUNO_COOKIE,
-            suno_api_base=SUNO_API_BASE,
+            sunoapi_key=SUNOAPI_KEY,
+            sunoapi_base=SUNOAPI_BASE,
         )
         log.info(f"[pipeline] Audio: {audio.path} ({audio.duration_seconds:.1f}s)")
 
