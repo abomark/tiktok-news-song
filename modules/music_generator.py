@@ -73,6 +73,8 @@ async def generate_music(
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) -> str:
     """POST to sunoapi.org and return the task ID."""
+    # callBackUrl is required by sunoapi.org but we don't use webhooks — we poll instead.
+    # Any valid HTTPS URL satisfies the validation; we ignore whatever they POST to it.
     payload = {
         "customMode": True,
         "instrumental": False,
@@ -80,6 +82,7 @@ async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) 
         "prompt": lyrics,
         "style": style,
         "title": title,
+        "callBackUrl": "https://example.com/noop",
     }
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=60) as client:
