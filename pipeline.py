@@ -94,6 +94,24 @@ def _lyrics_exist_for(headline: str, day_dir: Path) -> bool:
     return False
 
 
+def _find_run_dir_for(headline: str, day_dir: Path) -> Path | None:
+    """Return the run folder for a headline if it exists, else None."""
+    for existing in sorted(day_dir.glob("*/headline.txt")):
+        try:
+            first_line = existing.read_text(encoding="utf-8").split("\n")[0].strip()
+            if first_line == headline:
+                return existing.parent
+        except OSError:
+            pass
+    return None
+
+
+def _song_exists_for(headline: str, day_dir: Path) -> bool:
+    """Return True if a song.mp3 already exists for this headline today."""
+    run_dir = _find_run_dir_for(headline, day_dir)
+    return run_dir is not None and (run_dir / "song.mp3").exists()
+
+
 def _provider_config(provider: str) -> tuple[str, str, str]:
     """Return (api_key, base_url, model) for the given provider."""
     import os
@@ -198,6 +216,92 @@ async def run_all_flagged(provider: str = "ollama") -> None:
         generated += 1
 
     log.info(f"[pipeline] All-flagged done — {generated} generated, {skipped} skipped.")
+
+
+async def run_all_flagged_music(provider: str = "ollama") -> None:
+    """Generate lyrics + music for every flagged story today that doesn't have a song yet."""
+    import json
+    today = date.today().isoformat()
+    day_dir = OUTPUT_DIR / today
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    flagged_log = Path("logs/flagged_stories.jsonl")
+    if not flagged_log.exists():
+        log.warning("[pipeline] No flagged_stories.jsonl found — run the scheduler first.")
+        return
+
+    entries = []
+    for line in flagged_log.read_text(encoding="utf-8").strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+            if e.get("date") == today:
+                entries.append(e)
+        except json.JSONDecodeError:
+            pass
+
+    if not entries:
+        log.warning(f"[pipeline] No flagged stories for {today}.")
+        return
+
+    log.info(f"[pipeline] {len(entries)} flagged stories for {today}")
+
+    generated = 0
+    skipped = 0
+    for e in entries:
+        headline = e.get("headline", "")
+        if not headline:
+            continue
+
+        if _song_exists_for(headline, day_dir):
+            log.info(f"[pipeline] Song already exists — skipping: {headline[:70]}")
+            skipped += 1
+            continue
+
+        # Generate lyrics first if not already done
+        run_dir = _find_run_dir_for(headline, day_dir)
+        if run_dir is None:
+            log.info(f"[pipeline] Generating lyrics for: {headline[:70]}")
+            _, run_dir = await _generate_and_save_lyrics(
+                headline=headline,
+                summary=e.get("summary", ""),
+                angle=e.get("angle", ""),
+                url=e.get("url", ""),
+                day_dir=day_dir,
+                provider=provider,
+            )
+        else:
+            log.info(f"[pipeline] Lyrics already exist, generating music for: {headline[:70]}")
+
+        # Generate music
+        lyrics_path = run_dir / "lyrics.txt"
+        lyrics_raw = lyrics_path.read_text(encoding="utf-8")
+        # Extract the lyrics body (strip TITLE: line and CAPTION: block)
+        lyrics_body = "\n".join(
+            line for line in lyrics_raw.splitlines()
+            if not line.startswith("TITLE:") and not line.startswith("---") and not line.startswith("CAPTION:")
+        ).strip()
+        title_line = next((l for l in lyrics_raw.splitlines() if l.startswith("TITLE:")), "TITLE: Untitled")
+        title = title_line.removeprefix("TITLE:").strip()
+
+        log.info(f"[pipeline] Generating music (sunoapi.org) for: {title}")
+        try:
+            audio = await generate_music(
+                lyrics_text=lyrics_body,
+                style_prompt="upbeat pop, punchy drums, catchy hook, modern production",
+                title=title,
+                output_dir=run_dir,
+                sunoapi_key=SUNOAPI_KEY,
+                sunoapi_base=SUNOAPI_BASE,
+            )
+            log.info(f"[pipeline] Music saved: {audio.path} ({audio.duration_seconds:.1f}s)")
+            generated += 1
+        except Exception as exc:
+            log.error(f"[pipeline] Music generation failed for '{headline[:60]}': {exc}")
+
+    log.info(f"[pipeline] All-flagged-music done — {generated} generated, {skipped} skipped.")
 
 
 async def run(dry_run: bool = False, dry_run_full: bool = False, lyrics_only: bool = False, provider: str = "ollama", headline: str | None = None, summary: str | None = None) -> None:
@@ -324,6 +428,7 @@ def main() -> None:
     parser.add_argument("--dry-run-full", action="store_true", help="Skip Suno, video, and TikTok (test news+lyrics only)")
     parser.add_argument("--lyrics-only", action="store_true", help="Only fetch news and generate lyrics, then stop")
     parser.add_argument("--all-flagged", action="store_true", help="Generate lyrics for all of today's flagged stories (skips those already done)")
+    parser.add_argument("--all-flagged-music", action="store_true", help="Generate lyrics + music for all of today's flagged stories (skips stories that already have a song)")
     parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "grok"],
                         help="LLM provider for lyrics (default: ollama)")
     parser.add_argument("--headline", type=str, default=None, help="Override news headline")
@@ -334,6 +439,10 @@ def main() -> None:
 
     if args.all_flagged:
         asyncio.run(run_all_flagged(provider=args.provider))
+        return
+
+    if args.all_flagged_music:
+        asyncio.run(run_all_flagged_music(provider=args.provider))
         return
 
     asyncio.run(run(
