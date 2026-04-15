@@ -290,13 +290,11 @@ async def run_all_flagged_music(provider: str = "ollama") -> None:
         # Generate music
         lyrics_path = run_dir / "lyrics.txt"
         lyrics_raw = lyrics_path.read_text(encoding="utf-8")
-        # Extract the lyrics body (strip TITLE: line and CAPTION: block)
-        lyrics_body = "\n".join(
-            line for line in lyrics_raw.splitlines()
-            if not line.startswith("TITLE:") and not line.startswith("---") and not line.startswith("CAPTION:")
-        ).strip()
+        # lyrics.txt format: "TITLE: ...\n\n<lyrics>\n\n---\nCAPTION:\n<caption>"
+        # Split on the separator to get only the pure lyrics body
         title_line = next((l for l in lyrics_raw.splitlines() if l.startswith("TITLE:")), "TITLE: Untitled")
         title = title_line.removeprefix("TITLE:").strip()
+        lyrics_body = lyrics_raw.split("\n\n---\n")[0].removeprefix(title_line).strip()
 
         log.info(f"[pipeline] Generating music (sunoapi.org) for: {title}")
         try:
