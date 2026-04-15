@@ -82,7 +82,7 @@ async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) 
     payload = {
         "customMode": True,
         "instrumental": False,
-        "model": "V4",
+        "model": "V5_5",
         "prompt": lyrics,
         "style": style,
         "title": title,
