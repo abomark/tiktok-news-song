@@ -84,7 +84,7 @@ async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str) 
         "instrumental": False,
         "model": "V5_5",
         "prompt": lyrics,
-        "style": style,
+        "style": f"{style}, short song, 30 seconds, under 40 seconds",
         "title": title,
         "callBackUrl": "https://example.com/noop",
     }
