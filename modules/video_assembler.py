@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -96,7 +97,7 @@ async def assemble_video(
         "-map", f"{n}:a",
         "-c:v", "libx264",
         "-preset", "fast",
-        "-crf", "23",
+        "-crf", "21",
         "-c:a", "aac",
         "-b:a", "192k",
         "-shortest",
@@ -108,20 +109,20 @@ async def assemble_video(
     log.info(f"[assemble] Assembling {n} clips into {output_path.name}...")
     log.debug(f"[assemble] ffmpeg command: {' '.join(cmd)}")
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         cwd=str(output_dir),
     )
-    _, stderr = await proc.communicate()
 
     for tf in temp_files:
         tf.unlink(missing_ok=True)
 
-    if proc.returncode != 0:
-        log.error(f"[assemble] ffmpeg stderr:\n{stderr.decode()}")
-        raise RuntimeError(f"ffmpeg assembly failed with exit code {proc.returncode}")
+    if result.returncode != 0:
+        log.error(f"[assemble] ffmpeg stderr:\n{result.stderr.decode()}")
+        raise RuntimeError(f"ffmpeg assembly failed with exit code {result.returncode}")
 
     log.info(f"[assemble] Done: {output_path}")
     return output_path

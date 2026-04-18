@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 import json
+import logging
 from datetime import date, datetime
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 _LOGS_DIR = Path(__file__).parent.parent / "logs"
 
 
-def log_api_call(api_name: str, params: dict, run_dir: Path | None = None) -> None:
-    """Append an API call to the central logs/api_calls.jsonl file.
+def _supabase_insert(entry: dict) -> None:
+    """Push a single api_calls row to Supabase. Silently skips if not configured."""
+    try:
+        from db.client import get_client
+        sb = get_client()
+        payload = {k: v for k, v in entry.items()
+                   if k not in ("timestamp", "api", "run_dir")}
+        row = {
+            "timestamp": entry["timestamp"],
+            "api":       entry["api"],
+            "run_dir":   entry.get("run_dir"),
+            "payload":   payload,
+        }
+        sb.table("api_calls").insert(row).execute()
+    except Exception as e:
+        log.debug(f"[utils] Supabase insert skipped: {e}")
 
-    Each line is a self-contained JSON object (JSONL format) so appending is safe.
-    """
+
+def log_api_call(api_name: str, params: dict, run_dir: Path | None = None) -> None:
+    """Append an API call to logs/api_calls.jsonl and push to Supabase in real-time."""
     _LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_file = _LOGS_DIR / "api_calls.jsonl"
 
@@ -25,6 +43,8 @@ def log_api_call(api_name: str, params: dict, run_dir: Path | None = None) -> No
 
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    _supabase_insert(entry)
 
 
 def find_run_dir(date_str: str | None = None, run: str | None = None) -> Path:

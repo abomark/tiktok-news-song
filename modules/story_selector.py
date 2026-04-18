@@ -105,6 +105,7 @@ def _log_flagged(candidates: list[CandidateResult], today: str, timestamp: str, 
             "source": c.story.source,
             "url": c.story.url,
             "summary": c.story.summary,
+            "image_url": c.story.image_url,
             "combined_score": c.combined_score,
             "social_score": c.social_score,
             "vpi": c.classification.vpi if c.classification else None,
@@ -114,6 +115,11 @@ def _log_flagged(candidates: list[CandidateResult], today: str, timestamp: str, 
         }
         _append_line(log_file, entry)
         existing_keys.add(key)
+        try:
+            from db.client import get_client
+            get_client().table("flagged_stories").insert(entry).execute()
+        except Exception:
+            pass
 
 
 def _log_decision(candidates: list[CandidateResult], today: str, timestamp: str, threshold: float) -> None:
@@ -155,6 +161,11 @@ def _log_decision(candidates: list[CandidateResult], today: str, timestamp: str,
         ],
     }
     _append_line(log_file, entry)
+    try:
+        from db.client import get_client
+        get_client().table("selection_decisions").insert(entry).execute()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

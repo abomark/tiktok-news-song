@@ -142,8 +142,11 @@ def _parse_response(raw: str, story: NewsStory, run_dir: str | None) -> StoryCla
     )
 
 
-def _load_cached(headline: str, today: str) -> StoryClassification | None:
-    """Return an existing classification for this headline+date, or None."""
+def _load_cached(headline: str, today: str, classifier: str | None = None) -> StoryClassification | None:
+    """Return an existing classification for this headline+date, or None.
+
+    If classifier is specified, only return entries matching that classifier tag.
+    """
     log_file = _LOGS_DIR / "story_classifications.jsonl"
     if not log_file.exists():
         return None
@@ -154,7 +157,8 @@ def _load_cached(headline: str, today: str) -> StoryClassification | None:
         try:
             entry = json.loads(line)
             if entry.get("headline") == headline and entry.get("date") == today:
-                # Reconstruct from stored dict
+                if classifier and entry.get("classifier") != classifier:
+                    continue
                 factors = {
                     k: FactorScore(
                         score=entry[k]["score"],
@@ -179,13 +183,22 @@ def _load_cached(headline: str, today: str) -> StoryClassification | None:
     return None
 
 
-def _append_log(classification: StoryClassification, today: str) -> None:
+def _append_log(classification: StoryClassification, today: str, classifier: str | None = None, extra: dict | None = None) -> None:
     _LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_file = _LOGS_DIR / "story_classifications.jsonl"
     entry = classification.to_dict()
     entry["date"] = today
+    if classifier:
+        entry["classifier"] = classifier
+    if extra:
+        entry.update(extra)
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        from db.client import get_client
+        get_client().table("story_classifications").upsert(entry, on_conflict="headline,date").execute()
+    except Exception:
+        pass
 
 
 async def classify_story(
@@ -203,9 +216,9 @@ async def classify_story(
     """
     today = date.today().isoformat()
 
-    cached = _load_cached(story.headline, today)
+    cached = _load_cached(story.headline, today, classifier=model)
     if cached is not None:
-        log.info(f"[classifier] Cache hit for today — skipping model: {story.headline[:70]}")
+        log.info(f"[classifier] Cache hit for today ({model}) — skipping: {story.headline[:70]}")
         return cached
 
     client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -238,5 +251,97 @@ async def classify_story(
         f"[classifier] VPI={classification.vpi:.1f} ({classification.vpi_label}) — {story.headline[:60]}"
     )
 
-    _append_log(classification, today)
+    _append_log(classification, today, classifier=model)
     return classification
+
+
+def _merge_classifications(
+    a: StoryClassification,
+    b: StoryClassification,
+    label_a: str,
+    label_b: str,
+) -> tuple[StoryClassification, dict]:
+    """Average factor scores from two classifications, return merged + debug info."""
+    factors = {}
+    for key in _FACTOR_LABELS:
+        fa: FactorScore = getattr(a, key)
+        fb: FactorScore = getattr(b, key)
+        avg_score = round((fa.score + fb.score) / 2)
+        rationale = f"[{label_a}] {fa.rationale} | [{label_b}] {fb.rationale}"
+        factors[key] = FactorScore(score=avg_score, rationale=rationale)
+
+    scores = [f.score for f in factors.values()]
+    vpi = round(sum(scores) / len(scores), 2) if scores else 0.0
+
+    angle = a.angle if a.vpi >= b.vpi else b.angle
+
+    merged = StoryClassification(
+        headline=a.headline,
+        summary=a.summary,
+        source=a.source,
+        url=a.url,
+        timestamp=datetime.now().isoformat(),
+        run_dir=a.run_dir,
+        angle=angle,
+        vpi=vpi,
+        **factors,
+    )
+    extra = {f"vpi_{label_a}": a.vpi, f"vpi_{label_b}": b.vpi}
+    return merged, extra
+
+
+async def classify_story_dual(
+    story: NewsStory,
+    ollama_model: str = "gemma3",
+    ollama_base_url: str = "http://localhost:11434/v1",
+    grok_api_key: str = "",
+    grok_base_url: str = "https://api.x.ai/v1",
+    grok_model: str = "grok-3-fast",
+    run_dir: str | None = None,
+) -> StoryClassification:
+    """Classify with both Ollama and Grok, average the factor scores."""
+    import asyncio
+    today = date.today().isoformat()
+
+    cached = _load_cached(story.headline, today, classifier="dual")
+    if cached is not None:
+        log.info(f"[classifier] Dual cache hit — skipping: {story.headline[:70]}")
+        return cached
+
+    tasks = [
+        classify_story(
+            story=story, api_key="ollama",
+            model=ollama_model, base_url=ollama_base_url, run_dir=run_dir,
+        ),
+    ]
+    has_grok = bool(grok_api_key)
+    if has_grok:
+        tasks.append(
+            classify_story(
+                story=story, api_key=grok_api_key,
+                model=grok_model, base_url=grok_base_url, run_dir=run_dir,
+            ),
+        )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    ollama_result = None if isinstance(results[0], Exception) else results[0]
+    grok_result = None if (not has_grok or isinstance(results[1], Exception)) else results[1]
+
+    if ollama_result and grok_result:
+        merged, extra = _merge_classifications(ollama_result, grok_result, "gemma3", "grok")
+        log.info(
+            f"[classifier] Dual VPI={merged.vpi:.1f} "
+            f"(gemma3={ollama_result.vpi:.1f}, grok={grok_result.vpi:.1f}) "
+            f"— {story.headline[:60]}"
+        )
+        _append_log(merged, today, classifier="dual", extra=extra)
+        return merged
+
+    fallback = ollama_result or grok_result
+    if fallback is None:
+        raise RuntimeError(f"Both classifiers failed for: {story.headline[:60]}")
+
+    label = "gemma3" if ollama_result else "grok"
+    log.warning(f"[classifier] Only {label} succeeded — using single model for: {story.headline[:60]}")
+    return fallback

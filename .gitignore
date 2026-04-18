@@ -9,3 +9,5 @@ venv/
 *.mp3
 *.mp4
 *.png
+
+*.log

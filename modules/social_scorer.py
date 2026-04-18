@@ -185,6 +185,11 @@ def _log_social_scores(scored: list[ScoredStory]) -> None:
         with open(log_file, "a", encoding="utf-8") as f:
             for entry in new_entries:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                try:
+                    from db.client import get_client
+                    get_client().table("social_scores").insert(entry).execute()
+                except Exception:
+                    pass
         log.info(f"[scorer] Logged {len(new_entries)} social scores")
 
 

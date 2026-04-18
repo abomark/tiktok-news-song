@@ -47,9 +47,24 @@ def _upsert(sb, table: str, rows: list[dict], dry_run: bool) -> None:
         print(f"  [dry-run] {table} — would upsert {len(rows)} rows")
         print(f"    sample: {json.dumps(rows[0], default=str)[:120]}")
         return
-    # Supabase upsert with ignoreDuplicates=True is equivalent to ON CONFLICT DO NOTHING
-    sb.table(table).upsert(rows, ignore_duplicates=True).execute()
-    print(f"  [ok] {table} — upserted {len(rows)} rows")
+    # Insert in batches, skipping rows that already exist
+    BATCH = 100
+    inserted = 0
+    skipped = 0
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        try:
+            sb.table(table).upsert(batch, ignore_duplicates=True).execute()
+            inserted += len(batch)
+        except Exception:
+            # Fall back to one-by-one to skip individual duplicates
+            for row in batch:
+                try:
+                    sb.table(table).insert(row).execute()
+                    inserted += 1
+                except Exception:
+                    skipped += 1
+    print(f"  [ok] {table} — inserted {inserted} rows, skipped {skipped} duplicates")
 
 
 # ── Per-table transformers ────────────────────────────────────────────────────
@@ -164,6 +179,42 @@ def _transform_selection_decisions(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _transform_lyrics_classifications(rows: list[dict]) -> list[dict]:
+    out = []
+    for r in rows:
+        if not r.get("title") or not r.get("date"):
+            continue
+        out.append({
+            "title":                r["title"],
+            "date":                 r["date"],
+            "timestamp":            r.get("timestamp"),
+            "headline":             r.get("headline"),
+            "classifier":           r.get("classifier"),
+            "lvi":                  r.get("lvi"),
+            "lvi_label":            r.get("lvi_label"),
+            "lvi_gemma3":           r.get("lvi_gemma3"),
+            "lvi_grok":             r.get("lvi_grok"),
+            "verdict":              r.get("verdict"),
+            "hook_strength":        r.get("hook_strength"),
+            "hook_position":        r.get("hook_position"),
+            "earworm_factor":       r.get("earworm_factor"),
+            "singability":          r.get("singability"),
+            "topicality":           r.get("topicality"),
+            "recognition_trigger":  r.get("recognition_trigger"),
+            "controversy_level":    r.get("controversy_level"),
+            "satire_type":          r.get("satire_type"),
+            "ingroup_signal":       r.get("ingroup_signal"),
+            "visual_hook_potential":r.get("visual_hook_potential"),
+            "meme_format_fit":      r.get("meme_format_fit"),
+            "quotability":          r.get("quotability"),
+            "participation_hook":   r.get("participation_hook"),
+            "takedown_risk":        r.get("takedown_risk"),
+            "algorithm_risk":       r.get("algorithm_risk"),
+            "shadowban_words":      r.get("shadowban_words"),
+        })
+    return out
+
+
 def _transform_api_calls(rows: list[dict]) -> list[dict]:
     """Non-key fields packed into a JSONB payload column."""
     out = []
@@ -184,12 +235,13 @@ def _transform_api_calls(rows: list[dict]) -> list[dict]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 TABLES = {
-    "news_candidates":      (LOGS_DIR / "news_candidates.jsonl",       _transform_news_candidates),
-    "social_scores":        (LOGS_DIR / "social_scores.jsonl",         _transform_social_scores),
-    "story_classifications":(LOGS_DIR / "story_classifications.jsonl", _transform_story_classifications),
-    "flagged_stories":      (LOGS_DIR / "flagged_stories.jsonl",       _transform_flagged_stories),
-    "selection_decisions":  (LOGS_DIR / "selection_decisions.jsonl",   _transform_selection_decisions),
-    "api_calls":            (LOGS_DIR / "api_calls.jsonl",             _transform_api_calls),
+    "news_candidates":        (LOGS_DIR / "news_candidates.jsonl",         _transform_news_candidates),
+    "social_scores":          (LOGS_DIR / "social_scores.jsonl",           _transform_social_scores),
+    "story_classifications":  (LOGS_DIR / "story_classifications.jsonl",   _transform_story_classifications),
+    "flagged_stories":        (LOGS_DIR / "flagged_stories.jsonl",         _transform_flagged_stories),
+    "selection_decisions":    (LOGS_DIR / "selection_decisions.jsonl",     _transform_selection_decisions),
+    "lyrics_classifications": (LOGS_DIR / "lyrics_classifications.jsonl",  _transform_lyrics_classifications),
+    "api_calls":              (LOGS_DIR / "api_calls.jsonl",               _transform_api_calls),
 }
 
 

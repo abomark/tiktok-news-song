@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,6 +81,8 @@ def parse_lyrics_lines(lyrics_path: Path) -> list[str]:
         if not line:
             continue
         if line.startswith("TITLE:"):
+            continue
+        if line.startswith("STYLE:"):
             continue
         if line.startswith("[") and line.endswith("]"):
             continue
@@ -247,6 +250,7 @@ def generate_ass_subtitles(
     output_path: Path,
     video_width: int = 1080,
     video_height: int = 1920,
+    karaoke: bool = True,
 ) -> Path:
     """Generate an ASS subtitle file with karaoke word highlighting.
 
@@ -266,7 +270,8 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: LyricsWhite,{font_name},{FONT_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,2,5,40,40,{margin_v},1
-Style: LyricsRed,{font_name},{FONT_SIZE},&H000000FF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,40,40,{margin_v},1
+Style: LyricsRed,{font_name},{FONT_SIZE},&H000000FF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,5,40,40,{margin_v},1
+Style: LyricsSolo,{font_name},{int(FONT_SIZE * 2)},&H000000FF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,0,5,40,40,{margin_v},1
 Style: Watermark,{font_name},36,&H99FFFFFF,&H99FFFFFF,&H66000000,&H66000000,-1,0,0,0,100,100,0,0,1,2,1,3,0,30,60,1
 
 [Events]
@@ -278,36 +283,62 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     wm_clean = WATERMARK_TEXT.encode("ascii", "ignore").decode("ascii")
     events = f"Dialogue: 0,{wm_start},{wm_end},Watermark,,0,0,0,,{wm_clean}\n"
 
-    # For each line: one white base layer + one red overlay per word
+    active_fs = int(FONT_SIZE * 1.12)
+    MAX_WORD_DURATION = 1.5
+
     for tl in timed_lines:
         line_start = _ass_timestamp(tl.start)
         line_end = _ass_timestamp(tl.end)
 
-        # Clean full line text
-        full_text = " ".join(_clean_word(w.word) for w in tl.words)
+        clean_words = [_clean_word(w.word).upper() for w in tl.words]
+        full_text = " ".join(clean_words)
 
-        # Layer 1: full line in white (visible entire line duration)
-        events += f"Dialogue: 1,{line_start},{line_end},LyricsWhite,,0,0,0,,{full_text}\n"
-
-        # Layer 2: for each word, show the full line but only the active word in red
-        # We do this by making all other words transparent and the active word red
+        # Group words that share the same time window
+        word_groups: list[tuple[float, float, list[int]]] = []
         for wi, tw in enumerate(tl.words):
-            word_start = _ass_timestamp(tw.start)
-            word_end = _ass_timestamp(tw.end)
+            if word_groups and abs(tw.start - word_groups[-1][0]) < 0.05 and abs(tw.end - word_groups[-1][1]) < 0.05:
+                word_groups[-1][2].append(wi)
+            else:
+                word_groups.append((tw.start, tw.end, [wi]))
 
-            # Build line with all words transparent except the current one in red
-            parts = []
-            for wj, tw2 in enumerate(tl.words):
-                clean = _clean_word(tw2.word)
-                if wj == wi:
-                    # This is the active word — red
-                    parts.append(clean)
-                else:
-                    # Invisible (alpha FF = fully transparent)
-                    parts.append(f"{{\\1a&HFF&}}{clean}{{\\1a&H00&}}")
+        word_groups = [
+            (s, min(e, s + MAX_WORD_DURATION), idxs)
+            for s, e, idxs in word_groups
+        ]
 
-            red_text = " ".join(parts)
-            events += f"Dialogue: 2,{word_start},{word_end},LyricsRed,,0,0,0,,{red_text}\n"
+        if karaoke:
+            prev_end = tl.start
+            for g_start, g_end, active_indices in word_groups:
+                if g_start > prev_end + 0.05:
+                    events += f"Dialogue: 1,{_ass_timestamp(prev_end)},{_ass_timestamp(g_start)},LyricsWhite,,0,0,0,,{full_text}\n"
+
+                active_set = set(active_indices)
+
+                white_parts = []
+                for wj, cw in enumerate(clean_words):
+                    if wj in active_set:
+                        white_parts.append(f"{{\\1a&HFF&\\3a&HFF&}}{cw}{{\\1a&H00&\\3a&H00&}}")
+                    else:
+                        white_parts.append(cw)
+                events += f"Dialogue: 1,{_ass_timestamp(g_start)},{_ass_timestamp(g_end)},LyricsWhite,,0,0,0,,{' '.join(white_parts)}\n"
+
+                red_parts = []
+                for wj, cw in enumerate(clean_words):
+                    if wj in active_set:
+                        red_parts.append(f"{{\\fs{active_fs}}}{cw}{{\\fs{FONT_SIZE}}}")
+                    else:
+                        red_parts.append(f"{{\\1a&HFF&\\3a&HFF&}}{cw}{{\\1a&H00&\\3a&H00&}}")
+                events += f"Dialogue: 2,{_ass_timestamp(g_start)},{_ass_timestamp(g_end)},LyricsRed,,0,0,0,,{' '.join(red_parts)}\n"
+
+                prev_end = g_end
+
+            if tl.end > prev_end + 0.05:
+                events += f"Dialogue: 1,{_ass_timestamp(prev_end)},{line_end},LyricsWhite,,0,0,0,,{full_text}\n"
+        else:
+            for g_start, g_end, active_indices in word_groups:
+                active_set = set(active_indices)
+                solo_text = " ".join(clean_words[i] for i in sorted(active_set))
+                events += f"Dialogue: 1,{_ass_timestamp(g_start)},{_ass_timestamp(g_end)},LyricsSolo,,0,0,0,,{solo_text}\n"
 
     ass_content = header + events
     output_path.write_text(ass_content, encoding="utf-8-sig")  # BOM for ASS compatibility
@@ -338,7 +369,7 @@ async def burn_captions(
         "-vf", f"ass={ass_name}:fontsdir=.",
         "-c:v", "libx264",
         "-preset", "fast",
-        "-crf", "23",
+        "-crf", "21",
         "-c:a", "copy",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
@@ -347,20 +378,143 @@ async def burn_captions(
 
     log.info(f"[caption] Burning karaoke subtitles onto video...")
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         cwd=str(output_dir),
     )
-    _, stderr = await proc.communicate()
 
-    if proc.returncode != 0:
-        log.error(f"[caption] ffmpeg stderr:\n{stderr.decode()}")
-        raise RuntimeError(f"ffmpeg captioning failed with exit code {proc.returncode}")
+    if result.returncode != 0:
+        log.error(f"[caption] ffmpeg stderr:\n{result.stderr.decode()}")
+        raise RuntimeError(f"ffmpeg captioning failed with exit code {result.returncode}")
 
     log.info(f"[caption] Captioned video saved to {output_path}")
     return output_path
+
+
+def build_timed_lines_from_suno(
+    aligned_words: list[dict],
+    lyric_lines: list[str],
+) -> list[TimedLine]:
+    """Build TimedLines from Suno's alignedWords, matched to lyric lines.
+
+    Suno's word list embeds section tags ([HOOK], [VERSE], [CHORUS]) and
+    repeats sections (e.g. hook sung twice before verse). We use the tags
+    to find the LAST occurrence of each section start, then consume words
+    sequentially from that point — this skips repeated intros and aligns
+    to the actual sung section.
+    """
+    import re
+
+    # Parse the raw word list into tagged segments, preserving section boundaries
+    # Each entry: {"tag": "HOOK"|"VERSE"|"CHORUS"|None, "word": str, "start": float, "end": float}
+    segments: list[dict] = []
+    for aw in aligned_words:
+        raw = aw.get("word", "")
+        start = float(aw.get("startS", 0))
+        end = float(aw.get("endS", 0))
+
+        # Extract section tag if present (e.g. "[HOOK]\nGemini's")
+        tag_match = re.match(r"\[([A-Z]+)\]\n?(.*)", raw, re.DOTALL)
+        if tag_match:
+            tag = tag_match.group(1)
+            remainder = tag_match.group(2).strip()
+            segments.append({"tag": tag, "word": None, "start": start, "end": end})
+            if remainder:
+                # Strip trailing newlines/section markers from remainder
+                remainder = re.sub(r"\n\[.*", "", remainder).strip("\n ")
+                if remainder:
+                    segments.append({"tag": None, "word": remainder, "start": start, "end": end})
+        else:
+            # Strip from first newline onwards — Suno sometimes merges the last word
+            # of one line with the first word of the next (e.g. "throne,\nQ2 ").
+            # Keeping the cross-line text breaks token matching for all subsequent lines.
+            word = raw.strip("\n ")
+            word = re.sub(r"\n.*", "", word).strip()
+            if word:
+                segments.append({"tag": None, "word": word, "start": start, "end": end})
+
+    # Find the LAST occurrence of each section tag — Suno often repeats the hook
+    # before the verse, so we want to start from the final appearance of each section
+    section_order = []  # ordered list of (tag, start_idx_in_segments)
+    seen_tags: dict[str, int] = {}
+    for i, seg in enumerate(segments):
+        if seg["tag"]:
+            seen_tags[seg["tag"]] = i  # overwrite — keeps last occurrence
+
+    # Rebuild ordered section starts from the last occurrences
+    for i, seg in enumerate(segments):
+        if seg["tag"] and seen_tags.get(seg["tag"]) == i:
+            section_order.append((seg["tag"], i))
+
+    # Build flat word list starting from the first relevant section start
+    # (skip repeated earlier sections)
+    first_section_idx = section_order[0][1] if section_order else 0
+    clean_words = [
+        s for s in segments[first_section_idx:]
+        if s["word"] and s["tag"] is None
+    ]
+
+    if not clean_words:
+        return []
+
+    def _clean_token(s: str) -> str:
+        return re.sub(r"[^\w]", "", s).lower()
+
+    # Consume Suno words greedily per lyric token.
+    # Suno sometimes splits a single word across multiple entries
+    # (e.g. "Gemini's" → "Gemini'" + "s"), so we merge consecutive
+    # Suno words into one lyric token until the concatenated text
+    # fuzzy-matches the token, then advance.
+    timed_lines: list[TimedLine] = []
+    word_idx = 0
+
+    for lyric_line in lyric_lines:
+        line_tokens = lyric_line.split()
+        if not line_tokens or word_idx >= len(clean_words):
+            continue
+
+        line_words: list[TimedWord] = []
+        for token in line_tokens:
+            if word_idx >= len(clean_words):
+                break
+            token_clean = _clean_token(token)
+            # Accumulate Suno words until we've matched this token
+            accumulated = ""
+            start_time = clean_words[word_idx]["start"]
+            end_time = clean_words[word_idx]["end"]
+            while word_idx < len(clean_words):
+                sw = clean_words[word_idx]
+                accumulated += _clean_token(sw["word"])
+                end_time = sw["end"]
+                word_idx += 1
+                if accumulated == token_clean or token_clean.startswith(accumulated):
+                    if accumulated == token_clean:
+                        break
+                else:
+                    # Gone too far — back up one
+                    word_idx -= 1
+                    break
+            line_words.append(TimedWord(word=token, start=start_time, end=end_time))
+
+        if line_words:
+            timed_lines.append(TimedLine(
+                text=lyric_line,
+                start=line_words[0].start,
+                end=line_words[-1].end,
+                words=line_words,
+            ))
+
+    # Cap each line's end at the next line's start — prevents captions
+    # bleeding into silence gaps (e.g. held notes with long endS)
+    for i in range(len(timed_lines) - 1):
+        next_start = timed_lines[i + 1].start
+        if timed_lines[i].end > next_start:
+            timed_lines[i].end = next_start
+
+    return timed_lines
 
 
 async def caption_video(
@@ -369,46 +523,39 @@ async def caption_video(
     lyrics_path: Path,
     output_path: Path,
     whisper_model: str = "base",
+    karaoke: bool = True,
 ) -> Path:
     """Full captioning pipeline: transcribe → match → generate ASS → burn."""
-    # Step 1: Transcribe audio with Whisper
-    whisper_words = transcribe_audio(audio_path, model_name=whisper_model)
-
-    # Save transcription for debugging
-    transcript_file = output_path.parent / "whisper_transcript.json"
-    transcript_file.write_text(
-        json.dumps(whisper_words, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    log.info(f"[caption] Saved transcript to {transcript_file}")
-
     # Step 2: Parse lyrics
     lyric_lines = parse_lyrics_lines(lyrics_path)
     log.info(f"[caption] Parsed {len(lyric_lines)} lyric lines")
 
-    # Step 3: Match lyrics to word-level timestamps
-    timed_lines = match_lyrics_to_timestamps(lyric_lines, whisper_words)
+    # Step 1: Use Suno's timestamped lyrics if available, else fall back to Whisper
+    suno_timed_file = output_path.parent / "timed_lyrics.json"
+    if suno_timed_file.exists():
+        log.info(f"[caption] Using Suno timestamped lyrics from {suno_timed_file}")
+        aligned_words = json.loads(suno_timed_file.read_text(encoding="utf-8"))
+        timed_lines = build_timed_lines_from_suno(aligned_words, lyric_lines)
+    else:
+        log.info("[caption] No Suno timestamps found — falling back to Whisper")
+        whisper_words = transcribe_audio(audio_path, model_name=whisper_model)
+        transcript_file = output_path.parent / "whisper_transcript.json"
+        transcript_file.write_text(
+            json.dumps(whisper_words, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        log.info(f"[caption] Saved transcript to {transcript_file}")
+        timed_lines = match_lyrics_to_timestamps(lyric_lines, whisper_words)
+
     log.info(f"[caption] Matched {len(timed_lines)} lines:")
     for tl in timed_lines:
         log.info(f"  [{tl.start:.1f}s - {tl.end:.1f}s] {tl.text} ({len(tl.words)} words)")
 
-    # Save timed lines for debugging
-    timed_file = output_path.parent / "timed_lyrics.json"
-    timed_data = []
-    for t in timed_lines:
-        timed_data.append({
-            "text": t.text,
-            "start": t.start,
-            "end": t.end,
-            "words": [{"word": w.word, "start": w.start, "end": w.end} for w in t.words],
-        })
-    timed_file.write_text(json.dumps(timed_data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    # Step 4: Generate ASS subtitle file
+    # Step 3: Generate ASS subtitle file
     ass_path = output_path.parent / "lyrics.ass"
-    generate_ass_subtitles(timed_lines, ass_path)
+    generate_ass_subtitles(timed_lines, ass_path, karaoke=karaoke)
 
-    # Step 5: Burn onto video
+    # Step 4: Burn onto video
     return await burn_captions(video_path, ass_path, output_path)
 
 
@@ -431,6 +578,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=None, help="Output video path")
     parser.add_argument("--whisper-model", type=str, default="base",
                         help="Whisper model size: tiny, base, small, medium, large")
+    parser.add_argument("--no-karaoke", action="store_true",
+                        help="Red-only mode: no white base layer, only the active word appears")
     args = parser.parse_args()
 
     async def main():
@@ -462,6 +611,7 @@ if __name__ == "__main__":
             lyrics_path=lyrics,
             output_path=output,
             whisper_model=args.whisper_model,
+            karaoke=not args.no_karaoke,
         )
         print(f"Captioned video: {result}")
 

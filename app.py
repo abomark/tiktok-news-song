@@ -28,7 +28,7 @@ st.title("CurrentNoise Dashboard")
 _HAS_LOCAL_OUTPUT = OUTPUT_DIR.exists() and any(
     p.is_dir() and p.name[:4].isdigit() for p in OUTPUT_DIR.iterdir()
 )
-_PAGES = ["News Feed", "Flagged Stories", "Selection Decisions", "Story Classifications", "Credits", "API Logs"]
+_PAGES = ["News Feed", "Flagged Stories", "Selection Decisions", "Story Classifications", "Lyrics Classifications", "Credits", "API Logs"]
 if _HAS_LOCAL_OUTPUT:
     _PAGES += ["Runs", "Run Detail"]
 page = st.sidebar.radio("Page", _PAGES)
@@ -695,6 +695,136 @@ if page == "Story Classifications":
                         bar = "█" * score + "░" * (10 - score)
                         st.markdown(f"**{label}**  `{score}/10`")
                         st.caption(f"{bar}  {rationale}")
+
+
+# ── Lyrics Classifications ───────────────────────────────────────────────────
+
+if page == "Lyrics Classifications":
+    st.header("Lyrics Classifications — Lyrics Virality Index")
+    st.caption("LVI breakdown for generated lyrics across Hook Mechanics, Cultural Payload, Creator Bait, and Platform Risk.")
+
+    entries = _load_table("lyrics_classifications", LOGS_DIR / "lyrics_classifications.jsonl", "timestamp")
+    if not entries:
+        st.info("No lyrics classifications yet. Run the pipeline to generate.")
+    else:
+        import pandas as pd
+
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            date_options = sorted({e.get("date", "") for e in entries}, reverse=True)
+            filter_date = st.selectbox("Date", ["All"] + date_options, key="lc_date")
+        with col_f2:
+            filter_text = st.text_input("Search title", placeholder="Filter...", key="lc_search")
+
+        filtered = list(reversed(entries))
+        if filter_date != "All":
+            filtered = [e for e in filtered if e.get("date") == filter_date]
+        if filter_text:
+            filtered = [e for e in filtered if filter_text.lower() in e.get("title", "").lower()]
+
+        st.caption(f"Showing {len(filtered)} of {len(entries)} classifications")
+
+        # Summary table
+        rows = []
+        for e in filtered:
+            lvi = e.get("lvi", 0)
+            rows.append({
+                "Date": e.get("date", ""),
+                "Title": e.get("title", "")[:55],
+                "LVI": round(lvi, 1),
+                "Label": e.get("lvi_label", ""),
+                "Hook": (e.get("hook_strength") or {}).get("score", ""),
+                "Earworm": (e.get("earworm_factor") or {}).get("score", ""),
+                "Quotability": (e.get("quotability") or {}).get("score", ""),
+                "Takedown Risk": (e.get("takedown_risk") or {}).get("value", ""),
+                "Algo Risk": (e.get("algorithm_risk") or {}).get("value", ""),
+                "Classifier": e.get("classifier", ""),
+            })
+        df = pd.DataFrame(rows)
+
+        def _color_lvi(val):
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                return ""
+            if v >= 8:
+                return "background-color: #1a7a1a; color: white"
+            if v >= 6:
+                return "background-color: #4a7a1a; color: white"
+            if v >= 4:
+                return "background-color: #7a6a1a; color: white"
+            return "background-color: #7a1a1a; color: white"
+
+        st.dataframe(
+            df.style.applymap(_color_lvi, subset=["LVI"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+
+        for e in filtered:
+            lvi = e.get("lvi", 0)
+            title = e.get("title", "")
+            ts = e.get("timestamp", "")[:16].replace("T", " ")
+            classifier = e.get("classifier", "")
+            icon = "🔥" if lvi >= 8 else "✅" if lvi >= 6 else "⚠️" if lvi >= 4 else "❌"
+
+            with st.expander(f"{icon} LVI {lvi:.1f} — {title}  ({ts})", expanded=False):
+                col_l, col_r = st.columns([3, 1])
+                with col_r:
+                    st.metric("LVI", f"{lvi:.1f} / 10")
+                    st.caption(e.get("lvi_label", ""))
+                    if classifier:
+                        st.caption(f"Classifier: `{classifier}`")
+                    if e.get("lvi_gemma3") is not None:
+                        st.caption(f"gemma3: {e['lvi_gemma3']:.1f} · grok: {e.get('lvi_grok', 0):.1f}")
+                with col_l:
+                    if e.get("headline"):
+                        st.markdown(f"**Headline:** {e['headline']}")
+                    if e.get("verdict"):
+                        st.info(f"**Verdict:** {e['verdict']}")
+
+                    # ── Hook Mechanics ────────────────────────────────────────
+                    st.markdown("**Hook Mechanics**")
+                    h_cols = st.columns(4)
+                    h_cols[0].metric("Hook Strength", f"{(e.get('hook_strength') or {}).get('score', 0)}/10")
+                    h_cols[0].caption((e.get('hook_strength') or {}).get('rationale', ''))
+                    h_cols[1].metric("Earworm", f"{(e.get('earworm_factor') or {}).get('score', 0)}/10")
+                    h_cols[1].caption((e.get('earworm_factor') or {}).get('rationale', ''))
+                    h_cols[2].metric("Hook Position", (e.get('hook_position') or {}).get('value', ''))
+                    h_cols[2].caption((e.get('hook_position') or {}).get('rationale', ''))
+                    h_cols[3].metric("Singability", (e.get('singability') or {}).get('value', ''))
+                    h_cols[3].caption((e.get('singability') or {}).get('rationale', ''))
+
+                    # ── Cultural Payload ──────────────────────────────────────
+                    st.markdown("**Cultural Payload**")
+                    c_cols = st.columns(5)
+                    c_cols[0].metric("Topicality", (e.get('topicality') or {}).get('value', ''))
+                    c_cols[1].metric("Recognition", (e.get('recognition_trigger') or {}).get('value', ''))
+                    c_cols[2].metric("Controversy", f"{(e.get('controversy_level') or {}).get('score', 0)}/10")
+                    c_cols[3].metric("Satire Type", (e.get('satire_type') or {}).get('value', ''))
+                    c_cols[4].metric("In-group", (e.get('ingroup_signal') or {}).get('value', ''))
+
+                    # ── Creator Bait ──────────────────────────────────────────
+                    st.markdown("**Creator Bait**")
+                    b_cols = st.columns(4)
+                    b_cols[0].metric("Visual Hook", (e.get('visual_hook_potential') or {}).get('value', ''))
+                    b_cols[1].metric("Meme Format", (e.get('meme_format_fit') or {}).get('value', ''))
+                    b_cols[2].metric("Quotability", f"{(e.get('quotability') or {}).get('score', 0)}/10")
+                    b_cols[3].metric("Participation", f"{(e.get('participation_hook') or {}).get('score', 0)}/10")
+
+                    # ── Platform Risk ─────────────────────────────────────────
+                    st.markdown("**Platform Risk**")
+                    r_cols = st.columns(3)
+                    r_cols[0].metric("Takedown Risk", (e.get('takedown_risk') or {}).get('value', ''))
+                    r_cols[0].caption((e.get('takedown_risk') or {}).get('rationale', ''))
+                    r_cols[1].metric("Algorithm Risk", (e.get('algorithm_risk') or {}).get('value', ''))
+                    r_cols[1].caption((e.get('algorithm_risk') or {}).get('rationale', ''))
+                    sb = e.get('shadowban_words') or {}
+                    r_cols[2].metric("Shadowban Words", sb.get('count', 0))
+                    if sb.get('words'):
+                        r_cols[2].caption(", ".join(sb['words']))
 
 
 # ── API Logs ─────────────────────────────────────────────────────────────────

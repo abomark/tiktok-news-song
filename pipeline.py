@@ -32,11 +32,11 @@ from config import (
     FIXED_HASHTAGS,
     NEWS_COUNTRY,
     OUTPUT_DIR,
-    RUNWAY_API_KEY,
+    POLLO_API_KEY,
 )
 from modules.news_fetcher import fetch_news_candidates
 from modules.social_scorer import score_candidates
-from modules.story_classifier import classify_story
+from modules.story_classifier import classify_story, classify_story_dual
 from modules.story_selector import score_and_flag
 from modules.lyrics_generator import generate_lyrics
 from modules.music_generator import generate_music
@@ -120,6 +120,14 @@ def _song_exists_for(headline: str, day_dir: Path) -> bool:
     return run_dir is not None and (run_dir / "song.mp3").exists()
 
 
+def _video_complete_for(headline: str, day_dir: Path) -> bool:
+    """Return True if final_captioned.mp4 already exists for this headline today."""
+    run_dir = _find_run_dir_for(headline, day_dir)
+    if run_dir is None:
+        return False
+    return (run_dir / "final_captioned.mp4").exists()
+
+
 def _provider_config(provider: str) -> tuple[str, str, str]:
     """Return (api_key, base_url, model) for the given provider."""
     import os
@@ -135,6 +143,7 @@ async def _generate_and_save_lyrics(
     url: str,
     day_dir: Path,
     provider: str,
+    image_url: str | None = None,
 ) -> tuple:
     """Generate lyrics for one story, write outputs, return (lyrics, output_dir)."""
     from modules.lyrics_generator import Lyrics
@@ -160,11 +169,14 @@ async def _generate_and_save_lyrics(
         f.rename(output_dir / f.name)
     temp_dir.rmdir()
 
+    headline_parts = [headline, "", summary, url]
+    if image_url:
+        headline_parts.append(f"IMAGE: {image_url}")
     (output_dir / "headline.txt").write_text(
-        f"{headline}\n\n{summary}\n{url}", encoding="utf-8"
+        "\n".join(headline_parts), encoding="utf-8"
     )
     (output_dir / "lyrics.txt").write_text(
-        f"TITLE: {lyrics.title}\n\n{lyrics.full_text}\n\n---\nCAPTION:\n{lyrics.caption}",
+        f"TITLE: {lyrics.title}\nSTYLE: {lyrics.style_prompt}\n\n{lyrics.full_text}\n\n---\nCAPTION:\n{lyrics.caption}",
         encoding="utf-8",
     )
     log.info(f"[pipeline] Output: {output_dir}")
@@ -280,6 +292,7 @@ async def run_all_flagged_music(provider: str = "ollama") -> None:
                     url=e.get("url", ""),
                     day_dir=day_dir,
                     provider=provider,
+                    image_url=e.get("image_url"),
                 )
             except Exception as exc:
                 log.error(f"[pipeline] Lyrics generation failed for '{headline[:60]}': {exc}")
@@ -314,75 +327,92 @@ async def run_all_flagged_music(provider: str = "ollama") -> None:
     log.info(f"[pipeline] All-flagged-music done — {generated} generated, {skipped} skipped.")
 
 
-async def run(dry_run: bool = False, dry_run_full: bool = False, lyrics_only: bool = False, provider: str = "ollama", headline: str | None = None, summary: str | None = None) -> None:
-    today = date.today().isoformat()
-    day_dir = OUTPUT_DIR / today
-    day_dir.mkdir(parents=True, exist_ok=True)
-
-    log.info("=" * 60)
-    log.info(f"Pipeline starting — {today}{' [DRY RUN]' if dry_run else ''}")
-    log.info("=" * 60)
-
-    # ── Step 1: News — fetch, classify all, select best ──────────
-    flagged: list = []
-    if headline and summary:
-        log.info(f"[pipeline] Using provided headline: {headline}")
-        from modules.news_fetcher import NewsStory
-        story = NewsStory(headline=headline, summary=summary, url="", source="manual")
-    else:
-        log.info("[pipeline] Fetching news candidates...")
-        stories = await fetch_news_candidates(NEWS_API_KEY, NEWS_COUNTRY)
-        log.info("[pipeline] Scoring candidates...")
-        scored = await score_candidates(stories)
-        log.info(f"[pipeline] Classifying {len(scored)} candidates...")
-        raw_classifications = await asyncio.gather(
-            *[
-                classify_story(
-                    story=s.story,
-                    model=OLLAMA_MODEL,
-                    base_url=OLLAMA_BASE_URL,
-                )
-                for s in scored
-            ],
-            return_exceptions=True,
-        )
-        classifications = [None if isinstance(r, Exception) else r for r in raw_classifications]
-        log.info(f"[pipeline] Flagging stories from {len(scored)} candidates...")
-        candidates = score_and_flag(scored, classifications)
-        flagged = [c for c in candidates if c.flagged]
-        story = flagged[0].story  # top-scoring flagged story
-
-    # Grab the angle from the flagged story (empty for manual --headline runs)
-    angle = ""
-    if flagged:
-        angle = flagged[0].classification.angle if flagged[0].classification else ""
-
+async def _run_one_story(
+    story,
+    angle: str,
+    day_dir: Path,
+    dry_run: bool,
+    dry_run_full: bool,
+    lyrics_only: bool,
+    provider: str,
+    video_model: str | None,
+) -> None:
+    """Run the full pipeline for a single story (lyrics → music → video → publish)."""
     log.info(f"[pipeline] Story: {story.headline}")
     if angle:
         log.info(f"[pipeline] Satirical angle: {angle}")
 
-    # ── Check: skip if lyrics already generated for this headline today ───────
-    if _lyrics_exist_for(story.headline, day_dir):
-        log.info("[pipeline] Lyrics already exist for this story — skipping.")
+    if _video_complete_for(story.headline, day_dir):
+        log.info("[pipeline] Video already complete for this story — skipping.")
         return
 
     # ── Step 2: Lyrics ────────────────────────────────────────────
-    log.info("[pipeline] Generating lyrics...")
-    lyrics, output_dir = await _generate_and_save_lyrics(
-        headline=story.headline,
-        summary=story.summary,
-        angle=angle,
-        url=story.url,
-        day_dir=day_dir,
-        provider=provider,
-    )
+    # Check if we already have a run dir with lyrics for this headline — reuse it.
+    existing_run_dir = _find_run_dir_for(story.headline, day_dir)
+    if existing_run_dir is not None and (existing_run_dir / "lyrics.txt").exists():
+        log.info(f"[pipeline] Reusing existing run dir: {existing_run_dir.name}")
+        from modules.lyrics_generator import Lyrics, LyricSection
+        from modules.clip_generator import parse_lyrics_file
+        lyrics_file = existing_run_dir / "lyrics.txt"
+        _, sections = parse_lyrics_file(lyrics_file)
+        text = lyrics_file.read_text(encoding="utf-8")
+        title_line = next((l for l in text.splitlines() if l.startswith("TITLE:")), "TITLE: Unknown")
+        style_line = next((l for l in text.splitlines() if l.startswith("STYLE:")), "STYLE:")
+        caption_parts = text.split("CAPTION:\n", 1)
+        caption = caption_parts[1].strip() if len(caption_parts) > 1 else ""
+        body = text.split("---")[0]
+        body_lines = [l for l in body.splitlines() if l and not l.startswith("TITLE:") and not l.startswith("STYLE:")]
+        lyrics = Lyrics(
+            title=title_line.replace("TITLE:", "").strip(),
+            style_prompt=style_line.replace("STYLE:", "").strip(),
+            sections=sections,
+            full_text="\n".join(body_lines),
+            caption=caption,
+            topic_tags=[],
+        )
+        output_dir = existing_run_dir
+    else:
+        log.info("[pipeline] Generating lyrics...")
+        lyrics, output_dir = await _generate_and_save_lyrics(
+            headline=story.headline,
+            summary=story.summary,
+            angle=angle,
+            url=story.url,
+            day_dir=day_dir,
+            provider=provider,
+            image_url=getattr(story, "image_url", None),
+        )
+
+        # ── Step 2b: Classify lyrics ─────────────────────────────
+        log.info("[pipeline] Classifying lyrics (dual: gemma3 + grok)...")
+        try:
+            import os as _os
+            from modules.lyrics_classifier import classify_lyrics_dual
+            lyrics_classification = await classify_lyrics_dual(
+                headline=story.headline,
+                title=lyrics.title,
+                lyrics_text=lyrics.full_text,
+                ollama_model=OLLAMA_MODEL,
+                ollama_base_url=OLLAMA_BASE_URL,
+                grok_api_key=_os.environ.get("XAI_API_KEY", ""),
+            )
+            log.info(f"[pipeline] Lyrics LVI={lyrics_classification.lvi:.1f} ({lyrics_classification.lvi_label})")
+        except Exception as exc:
+            log.warning(f"[pipeline] Lyrics classification failed (continuing): {exc}")
 
     if lyrics_only:
         log.info(f"[pipeline] LYRICS ONLY — done. Output: {output_dir}")
         return
 
     # ── Step 3: Music ─────────────────────────────────────────────
-    if dry_run_full:
+    existing_audio = output_dir / "song.mp3"
+    if existing_audio.exists():
+        log.info(f"[pipeline] Reusing existing song: {existing_audio.name}")
+        from modules.music_generator import AudioResult, _get_duration
+        duration = await _get_duration(existing_audio)
+        audio = AudioResult(path=existing_audio, duration_seconds=duration, title=lyrics.title)
+        log.info(f"[pipeline] Audio: {existing_audio.name} ({duration:.1f}s)")
+    elif dry_run_full:
         log.info("[pipeline] DRY RUN FULL — skipping Suno music generation.")
     else:
         log.info("[pipeline] Generating music (Suno)...")
@@ -401,21 +431,43 @@ async def run(dry_run: bool = False, dry_run_full: bool = False, lyrics_only: bo
         log.info("[pipeline] DRY RUN FULL — skipping video generation.")
     else:
         log.info("[pipeline] Generating video...")
+        api_key, base_url, model = _provider_config("grok")  # scene planner always uses Grok
+
+        # Check if clips already exist — skip expensive clip generation if so
+        existing_clips = sorted(output_dir.glob("clip_*.mp4"))
+        skip_clips = len(existing_clips) > 0
+        if skip_clips:
+            log.info(f"[pipeline] Found {len(existing_clips)} existing clips — skipping generation")
+
+        # Skip assembly if final.mp4 already exists — go straight to captioning
+        skip_assemble = (output_dir / "final.mp4").exists()
+        if skip_assemble:
+            log.info("[pipeline] final.mp4 exists — skipping assembly, captioning only")
+
         video = await generate_video(
             lyrics=lyrics,
             audio_path=audio.path,
             audio_duration=audio.duration_seconds,
             headline=story.headline,
             output_dir=output_dir,
-            runway_api_key=RUNWAY_API_KEY,
+            pollo_api_key=POLLO_API_KEY,
+            image_url=getattr(story, "image_url", None),
+            summary=story.summary,
+            llm_api_key=api_key,
+            llm_model=model,
+            llm_base_url=base_url,
+            video_model=video_model,
+            skip_clips=skip_clips,
+            skip_assemble=skip_assemble,
         )
         log.info(f"[pipeline] Video: {video.path}")
 
     # ── Step 5: Publish ───────────────────────────────────────────
     if dry_run:
         log.info("[pipeline] DRY RUN — skipping TikTok publish.")
-        log.info(f"[pipeline] Video ready at: {video.path}")
-        log.info(f"[pipeline] Caption:\n{lyrics.caption}")
+        if not dry_run_full:
+            log.info(f"[pipeline] Video ready at: {video.path}")
+            log.info(f"[pipeline] Caption:\n{lyrics.caption}")
         return
 
     log.info("[pipeline] Publishing to TikTok...")
@@ -427,6 +479,83 @@ async def run(dry_run: bool = False, dry_run_full: bool = False, lyrics_only: bo
         refresh_token=TIKTOK_REFRESH_TOKEN,
     )
     log.info(f"[pipeline] Posted! Publish ID: {result.publish_id}")
+
+
+async def run(dry_run: bool = False, dry_run_full: bool = False, lyrics_only: bool = False, provider: str = "ollama", headline: str | None = None, summary: str | None = None, video_model: str | None = None, max_stories: int = 3) -> None:
+    today = date.today().isoformat()
+    day_dir = OUTPUT_DIR / today
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("=" * 60)
+    log.info(f"Pipeline starting — {today}{' [DRY RUN]' if dry_run else ''}")
+    log.info("=" * 60)
+
+    # ── Step 1: News — fetch, classify all, select top flagged ───
+    if headline and summary:
+        log.info(f"[pipeline] Using provided headline: {headline}")
+        from modules.news_fetcher import NewsStory
+        story = NewsStory(headline=headline, summary=summary, url="", source="manual")
+        stories_to_run = [(story, "")]
+    else:
+        log.info("[pipeline] Fetching news candidates...")
+        stories = await fetch_news_candidates(NEWS_API_KEY, NEWS_COUNTRY)
+        from modules.news_fetcher import log_new_candidates
+        log_new_candidates(stories)
+        log.info("[pipeline] Scoring candidates...")
+        scored = await score_candidates(stories)
+        log.info(f"[pipeline] Classifying {len(scored)} candidates (dual: gemma3 + grok)...")
+        import os
+        grok_key = os.environ.get("XAI_API_KEY", "")
+        raw_classifications = await asyncio.gather(
+            *[
+                classify_story_dual(
+                    story=s.story,
+                    ollama_model=OLLAMA_MODEL,
+                    ollama_base_url=OLLAMA_BASE_URL,
+                    grok_api_key=grok_key,
+                )
+                for s in scored
+            ],
+            return_exceptions=True,
+        )
+        classifications = [None if isinstance(r, Exception) else r for r in raw_classifications]
+        log.info(f"[pipeline] Flagging stories from {len(scored)} candidates...")
+        candidates = score_and_flag(scored, classifications)
+        flagged = [c for c in candidates if c.flagged]
+
+        if not flagged:
+            log.warning("[pipeline] No flagged stories found — nothing to do.")
+            return
+
+        top = flagged[:max_stories]
+        log.info(f"[pipeline] {len(flagged)} flagged stories — processing top {len(top)} (max {max_stories}):")
+        for i, c in enumerate(top, 1):
+            log.info(f"  {i}. [{c.combined_score:.3f}] {c.story.headline[:70]}")
+
+        stories_to_run = [
+            (c.story, c.classification.angle if c.classification else "")
+            for c in top
+        ]
+
+    # ── Process each selected story ───────────────────────────────
+    for i, (story, angle) in enumerate(stories_to_run, 1):
+        log.info(f"\n[pipeline] ── Story {i}/{len(stories_to_run)} ──────────────────────────")
+        try:
+            await _run_one_story(
+                story=story,
+                angle=angle,
+                day_dir=day_dir,
+                dry_run=dry_run,
+                dry_run_full=dry_run_full,
+                lyrics_only=lyrics_only,
+                provider=provider,
+                video_model=video_model,
+            )
+        except Exception as exc:
+            import traceback
+            log.error(f"[pipeline] Story failed — skipping: {exc}")
+            log.error(f"[pipeline] Traceback: {traceback.format_exc()}")
+
     log.info("=" * 60)
     log.info("Pipeline complete.")
     log.info("=" * 60)
@@ -439,10 +568,14 @@ def main() -> None:
     parser.add_argument("--lyrics-only", action="store_true", help="Only fetch news and generate lyrics, then stop")
     parser.add_argument("--all-flagged", action="store_true", help="Generate lyrics for all of today's flagged stories (skips those already done)")
     parser.add_argument("--all-flagged-music", action="store_true", help="Generate lyrics + music for all of today's flagged stories (skips stories that already have a song)")
-    parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "grok"],
-                        help="LLM provider for lyrics (default: ollama)")
+    parser.add_argument("--provider", type=str, default="grok", choices=["ollama", "grok"],
+                        help="LLM provider for lyrics (default: grok)")
     parser.add_argument("--headline", type=str, default=None, help="Override news headline")
     parser.add_argument("--summary", type=str, default=None, help="Override news summary")
+    parser.add_argument("--video-model", type=str, default=None,
+                        help="Pollo video model (e.g. seedance-pro-1-5, veo3-1-fast). Default: seedance-pro-1-5")
+    parser.add_argument("--max-stories", type=int, default=3,
+                        help="Maximum number of top flagged stories to process per run (default: 3)")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -462,6 +595,8 @@ def main() -> None:
         provider=args.provider,
         headline=args.headline,
         summary=args.summary,
+        video_model=args.video_model,
+        max_stories=args.max_stories,
     ))
 
 

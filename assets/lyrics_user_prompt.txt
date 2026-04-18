@@ -5,7 +5,7 @@ SUMMARY: {summary}
 SATIRICAL ANGLE: {angle}
 
 Requirements:
-- Total song length: 30-45 seconds when sung at a moderate pop tempo (~100 BPM)
+- Total song length: 30-40 seconds when sung at a moderate pop tempo (~100 BPM)
 - Structure: 1 hook (opening 3 seconds, one punchy and controversial line) + 1 verse (4-6 lines) + 1 chorus (4 lines, repeated feel)
 - Each line: 6-12 syllables with natural rhythmic flow
 - Tone: satirical, fun, slightly sarcastic — like a meme in song form

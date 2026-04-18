@@ -29,6 +29,7 @@ class NewsStory:
     url: str
     source: str
     published_at: str | None = None   # ISO 8601 from the source, e.g. "2026-04-13T08:00:00Z"
+    image_url: str | None = None      # Article hero image from NewsAPI urlToImage
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +55,8 @@ async def _try_newsapi(api_key: str, country: str) -> list[NewsStory] | None:
                     summary=a.get("description", ""),
                     url=a.get("url", ""),
                     source=a.get("source", {}).get("name", "NewsAPI"),
-                    published_at=a.get("publishedAt"),   # e.g. "2026-04-13T08:34:00Z"
+                    published_at=a.get("publishedAt"),
+                    image_url=a.get("urlToImage") or None,
                 )
                 for a in articles
             ]
@@ -124,14 +126,16 @@ def _load_seen_headlines() -> set[str]:
 
 
 def log_new_candidates(stories: list[NewsStory]) -> list[NewsStory]:
-    """Append stories not seen before to logs/news_candidates.jsonl.
+    """Append today's candidates to logs/news_candidates.jsonl.
+
+    Logs ALL stories fetched today (for dashboard visibility), but only
+    returns stories not seen on a previous date (to avoid re-processing).
 
     Each record includes:
       - fetched_at   : when this pipeline run fetched the story
       - published_at : when the source says the article was published (may be None)
-
-    Returns only the stories that were new (not previously logged).
     """
+    from modules.utils import _supabase_insert
     _LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_file = _LOGS_DIR / "news_candidates.jsonl"
     seen = _load_seen_headlines()
@@ -139,22 +143,28 @@ def log_new_candidates(stories: list[NewsStory]) -> list[NewsStory]:
     fetched_at = datetime.now().isoformat()
 
     new_stories = [s for s in stories if s.headline not in seen]
-    if new_stories:
-        with open(log_file, "a", encoding="utf-8") as f:
-            for s in new_stories:
-                f.write(json.dumps({
-                    "date": today,
-                    "fetched_at": fetched_at,
-                    "published_at": s.published_at,
-                    "headline": s.headline,
-                    "summary": s.summary,
-                    "source": s.source,
-                    "url": s.url,
-                }, ensure_ascii=False) + "\n")
-        log.info(f"[news] Logged {len(new_stories)} new headlines ({len(stories) - len(new_stories)} already seen)")
-    else:
-        log.info(f"[news] No new headlines — all {len(stories)} already logged")
 
+    # Log ALL stories for today (not just new ones) so the dashboard stays current
+    with open(log_file, "a", encoding="utf-8") as f:
+        for s in stories:
+            row = {
+                "date": today,
+                "fetched_at": fetched_at,
+                "published_at": s.published_at,
+                "headline": s.headline,
+                "summary": s.summary,
+                "source": s.source,
+                "url": s.url,
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            # Push directly to news_candidates table in Supabase
+            try:
+                from db.client import get_client
+                get_client().table("news_candidates").upsert(row, on_conflict="headline,date").execute()
+            except Exception:
+                pass
+
+    log.info(f"[news] Logged {len(stories)} candidates ({len(new_stories)} new, {len(stories) - len(new_stories)} seen before)")
     return new_stories
 
 
