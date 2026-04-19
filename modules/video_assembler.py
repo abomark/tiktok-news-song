@@ -1,5 +1,5 @@
 """
-Step 2: Assemble video clips + audio into final.mp4 with watermark.
+Step 2: Assemble video clips + audio into final.mp4.
 
 Usage:
     python -m modules.video_assembler                   # uses today's output folder
@@ -10,9 +10,7 @@ Usage:
 from __future__ import annotations
 import asyncio
 import logging
-import shutil
 import subprocess
-import textwrap
 from pathlib import Path
 
 from modules.lyrics_generator import LyricSection
@@ -22,8 +20,6 @@ log = logging.getLogger(__name__)
 
 WIDTH = 1080
 HEIGHT = 1920
-WATERMARK = "@currentnoise"
-_FONT_ABS = Path(__file__).parent.parent / "assets" / "fonts" / "Roboto-Bold.ttf"
 
 
 async def assemble_video(
@@ -33,21 +29,11 @@ async def assemble_video(
     audio_path: Path,
     output_path: Path,
 ) -> Path:
-    """Assemble video clips into final.mp4 with watermark and audio."""
+    """Assemble video clips into final.mp4 with audio."""
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy font locally (avoids C: in ffmpeg filter paths on Windows)
-    local_font = output_dir / "Roboto-Bold.ttf"
-    if not local_font.exists():
-        shutil.copy2(_FONT_ABS, local_font)
-    font_path = local_font.name
-
     temp_files = []
-    wm_file = output_dir / "_watermark.txt"
-    wm_file.write_bytes(WATERMARK.encode("ascii", "ignore"))
-    temp_files.append(wm_file)
-
     filter_parts = []
     inputs = []
     n = len(clip_paths)
@@ -61,23 +47,10 @@ async def assemble_video(
             f"crop={WIDTH}:{HEIGHT},"
             f"setpts=PTS-STARTPTS,"
             f"trim=duration={section_duration},setpts=PTS-STARTPTS,"
-            f"fps=30[v{i}]"
+            f"fps=30[out{i}]"
         )
 
-        # Watermark overlay
-        watermark_dt = (
-            f"[v{i}]drawtext="
-            f"textfile={wm_file.name}:"
-            f"fontfile={font_path}:"
-            f"fontsize=42:"
-            f"fontcolor=white@0.6:"
-            f"borderw=2:bordercolor=black@0.4:"
-            f"x=w-text_w-30:"
-            f"y=60"
-            f"[out{i}]"
-        )
-
-        filter_parts += [scale_trim, watermark_dt]
+        filter_parts += [scale_trim]
 
     # Concatenate all segments
     concat_inputs = "".join(f"[out{i}]" for i in range(n))

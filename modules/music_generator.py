@@ -11,6 +11,7 @@ API docs: https://docs.sunoapi.org
 from __future__ import annotations
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,13 +39,15 @@ async def generate_music(
     output_dir: Path,
     sunoapi_key: str,
     sunoapi_base: str = DEFAULT_BASE,
+    vocal_gender: str | None = None,
 ) -> AudioResult:
     """Submit lyrics to sunoapi.org, poll until done, download .mp3."""
     from modules.utils import log_api_call
 
-    log.info("[music] Submitting to sunoapi.org...")
+    gender = vocal_gender if vocal_gender in ("m", "f") else random.choice(("m", "f"))
+    log.info(f"[music] Submitting to sunoapi.org (vocalGender={gender})...")
 
-    # Append [END] so Suno stops at the end of the written lyrics (~30-40s)
+    # Append [END] so Suno stops at the end of the written lyrics (~25-30s)
     # without it Suno often extends the song to 2+ minutes
     lyrics_with_end = lyrics_text.rstrip() + "\n\n[END]"
 
@@ -55,6 +58,7 @@ async def generate_music(
         api_key=sunoapi_key,
         base=sunoapi_base,
         run_dir=output_dir,
+        vocal_gender=gender,
     )
     log.info(f"[music] Task ID: {task_id}")
 
@@ -96,7 +100,7 @@ async def generate_music(
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str, run_dir: Path | None = None) -> str:
+async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str, run_dir: Path | None = None, vocal_gender: str = "m") -> str:
     """POST to sunoapi.org and return the task ID."""
     from modules.utils import log_api_call
 
@@ -107,8 +111,9 @@ async def _submit(lyrics: str, style: str, title: str, api_key: str, base: str, 
         "instrumental": False,
         "model": "V5",
         "prompt": lyrics,
-        "style": f"{style}, short song, exactly 30-40 seconds, no intro, no outro, no instrumental break, lyrics start immediately, end after chorus",
+        "style": f"{style}, short song, strictly under 30 seconds, no intro, no outro, no instrumental break, lyrics start immediately, minimal pause between hook and verse, end right after chorus",
         "title": title,
+        "vocalGender": vocal_gender,
         "callBackUrl": "https://example.com/noop",
     }
     log_api_call("suno-request", {

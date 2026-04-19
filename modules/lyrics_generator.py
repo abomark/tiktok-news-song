@@ -37,6 +37,7 @@ class Lyrics:
     style_prompt: str        # passed to Suno
     caption: str             # full TikTok post caption incl. hashtags
     topic_tags: list[str]    # e.g. ["#trump", "#tariffs"]
+    hook_caption: str = ""   # 2-line opening overlay for final_tiktok.mp4 (first 2s)
 
     @property
     def full_text(self) -> str:
@@ -60,8 +61,8 @@ HEADLINE: {headline}
 SUMMARY: {summary}
 
 Requirements:
-- Total song length: 30-45 seconds when sung at a moderate pop tempo (~100 BPM)
-- Structure: 1 hook (opening 3 seconds, one punchy line) + 1 verse (4-6 lines) + 1 chorus (4 lines, repeated feel)
+- Total song length: 25-30 seconds (hard cap at 30s) when sung at a moderate pop tempo (~100 BPM)
+- Structure: 1 hook (2-3s, one punchy line) + 1 verse (3-4 lines) + 1 chorus (3-4 lines). HOOK flows straight into VERSE with no pause or instrumental gap.
 - Tone: satirical, fun, slightly sarcastic — like a meme in song form
 - Style: upbeat pop or hip-hop, modern, radio-friendly
 
@@ -69,6 +70,13 @@ Also generate:
 - A Suno style prompt (music genre tags + mood, e.g. "upbeat pop, punchy drums, catchy hook, modern production")
 - 1-2 specific topic hashtags based on the actual news subject (e.g. #trump, #gaza, #royalfamily — NOT generic like #news or #trending)
 - A short TikTok caption (max 100 chars) that hooks viewers
+- A 2-line opening HOOK CAPTION that will appear as a white title-card overlay on the first 2 seconds of the video. Its job is to (1) signal the topic to TikTok's algorithm and (2) make viewers on the page want to click. Rules:
+  * Line 1: 3-5 words — topic or category label, ALL CAPS, with the main subject keyword (e.g. "NETFLIX IS COOKED" or "NEWS SATIRE: IRAN")
+  * Line 2: 5-8 words, max ~28 characters — a curiosity/teaser hook tied directly to this story's satirical angle
+  * Use a single "\n" between the two lines (ASCII newline — no literal backslash-n)
+  * Examples:
+    - "NETFLIX IS COOKED\nThey're streaming to zero 😬"
+    - "POPE VS TRUMP\nBiblical bars over a trap beat"
 
 Respond with this exact JSON structure:
 {{
@@ -78,7 +86,8 @@ Respond with this exact JSON structure:
   "chorus": ["line 1", "line 2", "line 3", "line 4"],
   "style_prompt": "upbeat pop, ...",
   "caption": "Short hook caption here",
-  "topic_tags": ["#specifictag1", "#specifictag2"]
+  "topic_tags": ["#specifictag1", "#specifictag2"],
+  "hook_caption": "LINE 1 HERE\nLine 2 teaser here"
 }}"""
 
 
@@ -209,12 +218,19 @@ async def generate_lyrics(
     caption_text = data.get("caption", data["title"])
     caption = f"{caption_text}\n\n{tags_str}"
 
+    hook_caption = str(data.get("hook_caption", "")).strip()
+    if not hook_caption or "\n" not in hook_caption:
+        # Fallback: programmatic 2-line card so final_tiktok.mp4 never ships blank
+        fallback_tag = topic_tags[0] if topic_tags else "#news"
+        hook_caption = f"{data['title'].upper()}\n{fallback_tag}"
+
     lyrics = Lyrics(
         title=data["title"],
         sections=sections,
         style_prompt=data.get("style_prompt", "upbeat pop, catchy, TikTok"),
         caption=caption,
         topic_tags=topic_tags,
+        hook_caption=hook_caption,
     )
     log.info(f"[lyrics] Generated: '{lyrics.title}'")
     return lyrics

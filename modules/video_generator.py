@@ -21,7 +21,7 @@ from modules.clip_generator import parse_lyrics_file
 from modules.pollo_generator import generate_clips_from_plan, parse_headline_file
 from modules.scene_planner import plan_scenes
 from modules.video_assembler import assemble_video
-from modules.captioner import caption_video
+from modules.captioner import caption_video, burn_hook_caption
 
 log = logging.getLogger(__name__)
 
@@ -48,12 +48,14 @@ async def generate_video(
     skip_clips: bool = False,
     skip_assemble: bool = False,
     skip_captions: bool = False,
+    skip_karaoke: bool = False,
     video_model: str | None = None,
+    hook_caption: str = "",
 ) -> VideoResult:
     """Full video generation pipeline."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    clip_duration = 5.0  # each Pollo clip is exactly 5s
+    clip_duration = 4.0  # each Pollo clip is exactly 4s
 
     # ── Step 0: Plan visual scenes via LLM ────────────────────────
     if skip_clips:
@@ -73,11 +75,14 @@ async def generate_video(
             model=llm_model,
             base_url=llm_base_url,
             output_dir=output_dir,
+            timed_lyrics_path=output_dir / "timed_lyrics.json",
         )
         # Save for debugging
         plan_data = [
             {"clip_index": s.clip_index, "prompt": s.prompt,
-             "is_image_to_video": s.is_image_to_video, "visual_action": s.visual_action}
+             "is_image_to_video": s.is_image_to_video, "visual_action": s.visual_action,
+             "alt_prompts": s.alt_prompts or [],
+             "prompt_variants": s.prompt_variants or []}
             for s in scene_plan.scenes
         ]
         (output_dir / "scene_plan.json").write_text(
@@ -112,10 +117,14 @@ async def generate_video(
             output_path=final_path,
         )
 
-    # ── Step 3: Burn captions ─────────────────────────────────────
+    # ── Step 3: Burn karaoke captions → final_captioned.mp4 (YouTube) ──
     captioned_path = output_dir / "final_captioned.mp4"
     if skip_captions:
         log.info("[video] Skipping captions.")
+    elif skip_karaoke:
+        log.info("[video] Skipping karaoke burn — using existing final_captioned.mp4.")
+        if not captioned_path.exists():
+            raise FileNotFoundError(f"No final_captioned.mp4 found in {output_dir}")
     else:
         lyrics_file = output_dir / "lyrics.txt"
         if lyrics_file.exists():
@@ -129,7 +138,25 @@ async def generate_video(
         else:
             log.warning("[video] No lyrics.txt found — skipping captions.")
 
-    result_path = captioned_path if captioned_path.exists() else final_path
+    # ── Step 4: Burn TikTok hook caption → final_tiktok.mp4 (TikTok) ────
+    tiktok_path = output_dir / "final_tiktok.mp4"
+    if hook_caption and not skip_captions and captioned_path.exists():
+        if tiktok_path.exists():
+            log.info("[video] final_tiktok.mp4 already exists — skipping hook burn.")
+        else:
+            await burn_hook_caption(
+                video_path=captioned_path,
+                output_path=tiktok_path,
+                hook_caption_text=hook_caption,
+            )
+
+    # Prefer TikTok version if present, else the YouTube-ready captioned, else the raw assembled
+    if tiktok_path.exists():
+        result_path = tiktok_path
+    elif captioned_path.exists():
+        result_path = captioned_path
+    else:
+        result_path = final_path
     log.info(f"[video] Done: {result_path}")
     return VideoResult(path=result_path, duration_seconds=audio_duration)
 
@@ -152,6 +179,9 @@ if __name__ == "__main__":
     parser.add_argument("--skip-clips", action="store_true", help="Skip clip generation, use existing clips")
     parser.add_argument("--skip-assemble", action="store_true", help="Skip assembly, use existing final.mp4")
     parser.add_argument("--skip-captions", action="store_true", help="Skip captioning step")
+    parser.add_argument("--skip-karaoke", action="store_true", help="Skip karaoke burn; reuse existing final_captioned.mp4 and only run the hook burn")
+    parser.add_argument("--hook-caption", type=str, default=None,
+                        help="Override 2-line TikTok hook caption (use \\n between lines). Default: read HOOK_CAPTION: from lyrics.txt")
     parser.add_argument("--whisper-model", type=str, default="base", help="Whisper model: tiny/base/small/medium/large")
     parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "grok"],
                         help="LLM provider for scene planning (default: ollama)")
@@ -175,6 +205,7 @@ if __name__ == "__main__":
             LyricSection(label="chorus", lines=["Tax on this, tax on that", "Economy going flat"]),
         ]
 
+        hook_caption = ""
         if args.reuse:
             headline_file = out / "headline.txt"
             lyrics_file = out / "lyrics.txt"
@@ -189,6 +220,15 @@ if __name__ == "__main__":
             hl_lines = headline_file.read_text(encoding="utf-8").splitlines()
             summary = hl_lines[2] if len(hl_lines) > 2 else ""
             title, sections = parse_lyrics_file(lyrics_file)
+
+            # Pull HOOK_CAPTION: block (2 lines) from lyrics.txt if present
+            lyrics_text = lyrics_file.read_text(encoding="utf-8")
+            if "HOOK_CAPTION:" in lyrics_text:
+                hook_block = lyrics_text.split("HOOK_CAPTION:", 1)[1].strip()
+                hook_caption = "\n".join(hook_block.splitlines()[:2])
+
+        if args.hook_caption:
+            hook_caption = args.hook_caption.replace("\\n", "\n")
 
         # LLM provider config
         if args.provider == "grok":
@@ -230,7 +270,9 @@ if __name__ == "__main__":
             skip_clips=args.skip_clips,
             skip_assemble=args.skip_assemble,
             skip_captions=args.skip_captions,
+            skip_karaoke=args.skip_karaoke,
             video_model=args.video_model,
+            hook_caption=hook_caption,
         )
         print(f"Video: {result.path}")
 

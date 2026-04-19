@@ -5,8 +5,8 @@ SUMMARY: {summary}
 SATIRICAL ANGLE: {angle}
 
 Requirements:
-- Total song length: 30-40 seconds when sung at a moderate pop tempo (~100 BPM)
-- Structure: 1 hook (opening 3 seconds, one punchy and controversial line) + 1 verse (4-6 lines) + 1 chorus (4 lines, repeated feel)
+- Total song length: 25-30 seconds (hard cap at 30s) when sung at a moderate pop tempo (~100 BPM)
+- Structure: 1 hook (2-3s, one punchy and controversial line) + 1 verse (3-4 lines) + 1 chorus (3-4 lines). HOOK flows straight into VERSE with no pause or instrumental gap.
 - Each line: 6-12 syllables with natural rhythmic flow
 - Tone: satirical, fun, slightly sarcastic — like a meme in song form
 - Style: upbeat pop or hip-hop, modern, radio-friendly
@@ -18,6 +18,13 @@ Also generate:
 - 2 fixed hash-tags (#fyp, #newsatire)
 - A short TikTok caption (max 100 chars) — should provoke curiosity or take a hot-take stance
 - Ready-to-paste Suno lyrics with metatags ([Hook], [Verse], [Chorus])
+- A 2-line opening HOOK CAPTION that will appear as a white title-card overlay on the first 2 seconds of the video. Its job is to (1) signal the topic to TikTok's algorithm and (2) make viewers on the page want to click. Rules:
+  * Line 1: 3-5 words — topic or category label, ALL CAPS, with the main subject keyword (e.g. "NETFLIX IS COOKED" or "NEWS SATIRE: IRAN")
+  * Line 2: 5-8 words, max ~28 characters — a curiosity/teaser hook tied directly to this story's satirical angle
+  * Use a single "\n" between the two lines (ASCII newline — no literal backslash-n)
+  * Examples:
+    - "NETFLIX IS COOKED\nThey're streaming to zero 😬"
+    - "POPE VS TRUMP\nBiblical bars over a trap beat"
 
 Respond with this exact JSON structure:
 {{
@@ -30,5 +37,6 @@ Respond with this exact JSON structure:
   "vocal_vibe": "deadpan / hyped / sarcastic",
   "caption": "Short hook caption here",
   "topic_tags": ["#specifictag1", "#specifictag2"],
-  "keywords": ["[Keyword1]", "[Keyword2]"]
+  "keywords": ["[Keyword1]", "[Keyword2]"],
+  "hook_caption": "LINE 1 HERE\nLine 2 teaser here"
 }}

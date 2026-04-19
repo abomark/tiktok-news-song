@@ -28,7 +28,7 @@ st.title("CurrentNoise Dashboard")
 _HAS_LOCAL_OUTPUT = OUTPUT_DIR.exists() and any(
     p.is_dir() and p.name[:4].isdigit() for p in OUTPUT_DIR.iterdir()
 )
-_PAGES = ["News Feed", "Flagged Stories", "Selection Decisions", "Story Classifications", "Lyrics Classifications", "Credits", "API Logs"]
+_PAGES = ["News Feed", "Score Distributions", "Flagged Stories", "Selection Decisions", "Story Classifications", "Lyrics Classifications", "Credits", "API Logs"]
 if _HAS_LOCAL_OUTPUT:
     _PAGES += ["Runs", "Run Detail"]
 page = st.sidebar.radio("Page", _PAGES)
@@ -247,6 +247,237 @@ if page == "News Feed":
                     v2.markdown(f"_{clf.get('vpi_label', '')}_")
                     if clf.get("angle"):
                         st.info(f"**Satirical angle:** {clf['angle']}")
+
+
+# ── Score Distributions ──────────────────────────────────────────────────────
+
+if page == "Score Distributions":
+    st.header("Score Distributions")
+    st.caption("Histograms of individual and combined scores across all scored stories.")
+
+    import pandas as pd
+
+    # Load data
+    social_entries = _load_table("social_scores", LOGS_DIR / "social_scores.jsonl")
+    clf_entries    = _load_table("story_classifications", LOGS_DIR / "story_classifications.jsonl")
+    decision_entries = _load_table("selection_decisions", LOGS_DIR / "selection_decisions.jsonl")
+
+    # Build a flat table of all candidates from selection_decisions (has normalised scores + combined)
+    candidates_all: list[dict] = []
+    for dec in decision_entries:
+        for c in (dec.get("candidates") or []):
+            candidates_all.append(c)
+
+    if not social_entries and not candidates_all:
+        st.info("No scored data yet. Run the pipeline to generate scores.")
+    else:
+        try:
+            import altair as alt
+
+            # ── Date filter ──────────────────────────────────────────────────
+            all_dates: set[str] = set()
+            for e in social_entries:
+                if e.get("date"):
+                    all_dates.add(e["date"])
+            for dec in decision_entries:
+                if dec.get("date"):
+                    all_dates.add(dec["date"])
+
+            date_options = sorted(all_dates, reverse=True)
+            filter_date = st.selectbox("Filter by date", ["All"] + date_options, key="dist_date")
+
+            def _soc_filtered():
+                if filter_date == "All":
+                    return social_entries
+                return [e for e in social_entries if e.get("date") == filter_date]
+
+            def _clf_filtered():
+                if filter_date == "All":
+                    return clf_entries
+                return [e for e in clf_entries if e.get("date") == filter_date]
+
+            def _cand_filtered():
+                if filter_date == "All":
+                    return candidates_all
+                # candidates from decision_entries for the filtered date
+                out = []
+                for dec in decision_entries:
+                    if filter_date == "All" or dec.get("date") == filter_date:
+                        for c in (dec.get("candidates") or []):
+                            out.append(c)
+                return out
+
+            soc  = _soc_filtered()
+            clfs = _clf_filtered()
+            cand = _cand_filtered()
+
+            st.divider()
+
+            # ── Section 1: Individual raw scores ────────────────────────────
+            st.subheader("Individual Scores (raw)")
+
+            if soc:
+                df_soc = pd.DataFrame([
+                    {
+                        "Reddit":   float(e.get("reddit_score") or 0),
+                        "HN":       float(e.get("hn_score") or 0),
+                        "Trends":   float(e.get("trends_score") or 0),
+                        "Social":   float(e.get("social_score") or 0),
+                    }
+                    for e in soc
+                ])
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    for metric in ["Reddit", "HN", "Trends"]:
+                        chart = (
+                            alt.Chart(df_soc)
+                            .mark_bar(color="#4e79a7")
+                            .encode(
+                                x=alt.X(f"{metric}:Q", bin=alt.Bin(maxbins=20), title=metric),
+                                y=alt.Y("count()", title="Stories"),
+                                tooltip=[alt.Tooltip(f"{metric}:Q", bin=True), "count()"],
+                            )
+                            .properties(title=f"{metric} Score Distribution", height=180)
+                        )
+                        st.altair_chart(chart, use_container_width=True)
+
+                with col2:
+                    chart_social = (
+                        alt.Chart(df_soc)
+                        .mark_bar(color="#f28e2b")
+                        .encode(
+                            x=alt.X("Social:Q", bin=alt.Bin(maxbins=20), title="Social Score (raw 0–100)"),
+                            y=alt.Y("count()", title="Stories"),
+                            tooltip=[alt.Tooltip("Social:Q", bin=True), "count()"],
+                        )
+                        .properties(title="Social Score Distribution (raw)", height=220)
+                    )
+                    st.altair_chart(chart_social, use_container_width=True)
+
+                    # Summary stats
+                    st.markdown("**Social score stats**")
+                    stats_cols = st.columns(4)
+                    stats_cols[0].metric("Mean", f"{df_soc['Social'].mean():.1f}")
+                    stats_cols[1].metric("Median", f"{df_soc['Social'].median():.1f}")
+                    stats_cols[2].metric("Min", f"{df_soc['Social'].min():.1f}")
+                    stats_cols[3].metric("Max", f"{df_soc['Social'].max():.1f}")
+            else:
+                st.info("No social scores yet.")
+
+            st.divider()
+
+            # ── Section 2: VPI (raw) ─────────────────────────────────────────
+            st.subheader("VPI — Viral Potential Index (raw 1–10)")
+
+            if clfs:
+                df_vpi = pd.DataFrame([{"VPI": float(e.get("vpi") or 0)} for e in clfs])
+
+                chart_vpi = (
+                    alt.Chart(df_vpi)
+                    .mark_bar(color="#59a14f")
+                    .encode(
+                        x=alt.X("VPI:Q", bin=alt.Bin(step=0.5), title="VPI (raw avg, 1–10)"),
+                        y=alt.Y("count()", title="Stories"),
+                        tooltip=[alt.Tooltip("VPI:Q", bin=True), "count()"],
+                    )
+                    .properties(title="VPI Distribution", height=240)
+                )
+
+                vcol1, vcol2 = st.columns([2, 1])
+                with vcol1:
+                    st.altair_chart(chart_vpi, use_container_width=True)
+                with vcol2:
+                    st.markdown("**VPI stats**")
+                    st.metric("Mean", f"{df_vpi['VPI'].mean():.2f}")
+                    st.metric("Median", f"{df_vpi['VPI'].median():.2f}")
+                    st.metric("Min", f"{df_vpi['VPI'].min():.1f}")
+                    st.metric("Max", f"{df_vpi['VPI'].max():.1f}")
+                    st.metric("n", len(df_vpi))
+            else:
+                st.info("No VPI classifications yet.")
+
+            st.divider()
+
+            # ── Section 3: Combined score + normalised inputs ─────────────────
+            st.subheader("Combined Score  `= 0.40 × social_norm + 0.60 × vpi_norm`")
+
+            if cand:
+                df_cand = pd.DataFrame([
+                    {
+                        "Combined":     float(c.get("combined_score") or 0),
+                        "Social norm":  float(c.get("social_norm") or 0),
+                        "VPI norm":     float(c.get("vpi_norm") or 0),
+                        "Flagged":      "Flagged" if c.get("flagged") else "Not flagged",
+                    }
+                    for c in cand
+                ])
+
+                # Combined histogram coloured by flagged status
+                chart_combined = (
+                    alt.Chart(df_cand)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("Combined:Q", bin=alt.Bin(maxbins=20), title="Combined Score (0–1)"),
+                        y=alt.Y("count()", title="Stories"),
+                        color=alt.Color(
+                            "Flagged:N",
+                            scale=alt.Scale(
+                                domain=["Flagged", "Not flagged"],
+                                range=["#e15759", "#4e79a7"],
+                            ),
+                        ),
+                        tooltip=[alt.Tooltip("Combined:Q", bin=True), "Flagged:N", "count()"],
+                    )
+                    .properties(title="Combined Score Distribution (red = flagged)", height=260)
+                )
+                st.altair_chart(chart_combined, use_container_width=True)
+
+                # Threshold line reference
+                st.caption("Threshold = 0.50 — stories at or above this are flagged.")
+
+                # Normalised inputs side by side
+                col_sn, col_vn = st.columns(2)
+                with col_sn:
+                    chart_sn = (
+                        alt.Chart(df_cand)
+                        .mark_bar(color="#76b7b2")
+                        .encode(
+                            x=alt.X("Social norm:Q", bin=alt.Bin(maxbins=20), title="Social norm (0–1)"),
+                            y=alt.Y("count()", title="Stories"),
+                            tooltip=[alt.Tooltip("Social norm:Q", bin=True), "count()"],
+                        )
+                        .properties(title="Social norm Distribution", height=200)
+                    )
+                    st.altair_chart(chart_sn, use_container_width=True)
+
+                with col_vn:
+                    chart_vn = (
+                        alt.Chart(df_cand)
+                        .mark_bar(color="#edc948")
+                        .encode(
+                            x=alt.X("VPI norm:Q", bin=alt.Bin(maxbins=20), title="VPI norm (0–1)"),
+                            y=alt.Y("count()", title="Stories"),
+                            tooltip=[alt.Tooltip("VPI norm:Q", bin=True), "count()"],
+                        )
+                        .properties(title="VPI norm Distribution", height=200)
+                    )
+                    st.altair_chart(chart_vn, use_container_width=True)
+
+                # Combined summary stats
+                st.markdown("**Combined score stats**")
+                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                sc1.metric("Mean", f"{df_cand['Combined'].mean():.3f}")
+                sc2.metric("Median", f"{df_cand['Combined'].median():.3f}")
+                sc3.metric("Min", f"{df_cand['Combined'].min():.3f}")
+                sc4.metric("Max", f"{df_cand['Combined'].max():.3f}")
+                sc5.metric("Flagged", f"{(df_cand['Flagged']=='Flagged').sum()} / {len(df_cand)}")
+            else:
+                st.info("No combined-score data yet (run the selector step).")
+
+        except ImportError:
+            st.error("Altair not installed. Run: `pip install altair`")
 
 
 # ── Credits ──────────────────────────────────────────────────────────────────

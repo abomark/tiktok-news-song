@@ -121,11 +121,11 @@ def _song_exists_for(headline: str, day_dir: Path) -> bool:
 
 
 def _video_complete_for(headline: str, day_dir: Path) -> bool:
-    """Return True if final_captioned.mp4 already exists for this headline today."""
+    """Return True if final_tiktok.mp4 already exists for this headline today."""
     run_dir = _find_run_dir_for(headline, day_dir)
     if run_dir is None:
         return False
-    return (run_dir / "final_captioned.mp4").exists()
+    return (run_dir / "final_tiktok.mp4").exists()
 
 
 def _provider_config(provider: str) -> tuple[str, str, str]:
@@ -175,10 +175,13 @@ async def _generate_and_save_lyrics(
     (output_dir / "headline.txt").write_text(
         "\n".join(headline_parts), encoding="utf-8"
     )
-    (output_dir / "lyrics.txt").write_text(
-        f"TITLE: {lyrics.title}\nSTYLE: {lyrics.style_prompt}\n\n{lyrics.full_text}\n\n---\nCAPTION:\n{lyrics.caption}",
-        encoding="utf-8",
+    lyrics_body = (
+        f"TITLE: {lyrics.title}\nSTYLE: {lyrics.style_prompt}\n\n"
+        f"{lyrics.full_text}\n\n---\nCAPTION:\n{lyrics.caption}"
     )
+    if lyrics.hook_caption:
+        lyrics_body += f"\n\n---\nHOOK_CAPTION:\n{lyrics.hook_caption}"
+    (output_dir / "lyrics.txt").write_text(lyrics_body, encoding="utf-8")
     log.info(f"[pipeline] Output: {output_dir}")
     return lyrics, output_dir
 
@@ -358,17 +361,25 @@ async def _run_one_story(
         text = lyrics_file.read_text(encoding="utf-8")
         title_line = next((l for l in text.splitlines() if l.startswith("TITLE:")), "TITLE: Unknown")
         style_line = next((l for l in text.splitlines() if l.startswith("STYLE:")), "STYLE:")
-        caption_parts = text.split("CAPTION:\n", 1)
-        caption = caption_parts[1].strip() if len(caption_parts) > 1 else ""
-        body = text.split("---")[0]
-        body_lines = [l for l in body.splitlines() if l and not l.startswith("TITLE:") and not l.startswith("STYLE:")]
+        # Parse CAPTION: section — ends at next "---" separator if present
+        caption = ""
+        if "CAPTION:\n" in text:
+            caption_tail = text.split("CAPTION:\n", 1)[1]
+            caption = caption_tail.split("\n---\n", 1)[0].strip()
+        # Parse optional HOOK_CAPTION: section; fall back to title-based card for legacy files
+        title_val = title_line.replace("TITLE:", "").strip()
+        if "HOOK_CAPTION:" in text:
+            hook_block = text.split("HOOK_CAPTION:", 1)[1].strip()
+            hook_caption = "\n".join(hook_block.splitlines()[:2])
+        else:
+            hook_caption = f"{title_val.upper()}\n#news"
         lyrics = Lyrics(
-            title=title_line.replace("TITLE:", "").strip(),
+            title=title_val,
             style_prompt=style_line.replace("STYLE:", "").strip(),
             sections=sections,
-            full_text="\n".join(body_lines),
             caption=caption,
             topic_tags=[],
+            hook_caption=hook_caption,
         )
         output_dir = existing_run_dir
     else:
@@ -444,6 +455,11 @@ async def _run_one_story(
         if skip_assemble:
             log.info("[pipeline] final.mp4 exists — skipping assembly, captioning only")
 
+        # Skip karaoke burn if final_captioned.mp4 already exists — only run the TikTok hook burn
+        skip_karaoke = (output_dir / "final_captioned.mp4").exists()
+        if skip_karaoke:
+            log.info("[pipeline] final_captioned.mp4 exists — skipping karaoke burn, hook-caption only")
+
         video = await generate_video(
             lyrics=lyrics,
             audio_path=audio.path,
@@ -459,6 +475,8 @@ async def _run_one_story(
             video_model=video_model,
             skip_clips=skip_clips,
             skip_assemble=skip_assemble,
+            skip_karaoke=skip_karaoke,
+            hook_caption=lyrics.hook_caption,
         )
         log.info(f"[pipeline] Video: {video.path}")
 

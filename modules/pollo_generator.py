@@ -29,8 +29,8 @@ POLL_INTERVAL = 10   # seconds between status checks
 MAX_WAIT = 600       # seconds before giving up (v2.0 can take a few minutes)
 DEFAULT_BASE = "https://pollo.ai/api/platform"
 
-# Pollo clips are 5s each; we generate enough to cover each section
-CLIP_DURATION = 5
+# Pollo clips are 4s each; we generate enough to cover each section
+CLIP_DURATION = 4
 
 # ── Model registry ────────────────────────────────────────────────────────────
 # Each entry: endpoint_prefix, supported clip lengths, default clip length
@@ -41,7 +41,7 @@ _MODEL_REGISTRY: dict[str, dict] = {
     },
     "veo3-1": {
         "endpoint": "google/veo3-1",
-        "clip_length": 6,       # 6s, 720p, text-to-video
+        "clip_length": 4,       # 4s, 720p, text-to-video
     },
     "veo3-1-fast": {
         "endpoint": "google/veo3-1-fast",
@@ -141,13 +141,11 @@ async def generate_clips_from_plan(
             mode = "IMG→VID" if scene_image else "TXT→VID"
             log.info(f"[clips] Pollo [{scene.clip_index}] ({mode}) — {scene.visual_action[:50]}...")
 
-            prompts_to_try = [
-                scene.prompt,
-                f"Cinematic scene: {scene.visual_action}. Dynamic camera, vibrant colors, 9:16 vertical.",
-                "Cinematic aerial view of a city skyline at golden hour. Smooth camera movement, vibrant colors, 9:16 vertical.",
-            ]
+            variants = scene.prompt_variants or [scene.prompt]
+            log.debug(f"[clips] Pollo [{scene.clip_index}] variants: L0={variants[0][:80]!r} ... Llast={variants[-1][:80]!r}")
+
             last_err: Exception | None = None
-            for attempt, prompt in enumerate(prompts_to_try):
+            for attempt, prompt in enumerate(variants):
                 try:
                     video_url = await _submit(
                         prompt=prompt,
@@ -159,15 +157,24 @@ async def generate_clips_from_plan(
                     )
                     clip_path = output_dir / f"clip_{scene.clip_index:02d}.mp4"
                     await _download_file(video_url, clip_path)
+                    if attempt > 0:
+                        log.warning(f"[clips] Pollo [{scene.clip_index}] accepted at variant {attempt}/{len(variants)-1} (after content filter)")
                     log.info(f"[clips] Pollo [{scene.clip_index}] saved → {clip_path}")
                     return clip_path
                 except RuntimeError as e:
                     last_err = e
-                    if "sensitive" in str(e).lower() or "harmful" in str(e).lower():
-                        log.warning(f"[clips] Pollo [{scene.clip_index}] content filter (attempt {attempt+1}) — retrying with safer prompt")
+                    err_text = str(e).lower()
+                    if any(tok in err_text for tok in ("sensitive", "harmful", "content", "policy", "blocked", "nsfw")):
+                        log.warning(
+                            f"[clips] Pollo [{scene.clip_index}] content filter at variant {attempt}/{len(variants)-1} "
+                            f"— retrying with safer variant: {prompt[:120]!r}"
+                        )
                         continue
                     raise
-            raise last_err
+            raise RuntimeError(
+                f"[clips] Pollo [{scene.clip_index}] — all {len(variants)} variants blocked by content filter. "
+                f"Last error: {last_err}"
+            )
 
     results = await asyncio.gather(*[_gen_one(s) for s in plan.scenes])
     # Sort by clip index since gather may return out of order
